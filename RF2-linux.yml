@@ -1,0 +1,14 @@
+name: RF2
+channels:
+  - pytorch
+  - nvidia
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pytorch
+  - pytorch-cuda=11.7
+  - dglteam/label/cu117::dgl
+  - pyg::pyg
+  - bioconda::hhsuite

@@ -1,4 +1,4 @@
-# RF2NA
+# RF2
 GitHub repo for RoseTTAFold2
 
 ## Installation
@@ -16,7 +16,7 @@ conda env create -f RF2-linux.yml
 ```
 You also need to install NVIDIA's SE(3)-Transformer (**please use SE3Transformer in this repo to install**).
 ```
-conda activate RF2NA
+conda activate RF2
 cd SE3Transformer
 pip install --no-cache-dir -r requirements.txt
 python setup.py install
@@ -50,7 +50,7 @@ tar xfz pdb100_2021Mar03.tar.gz
 ## Examples
 Prepare to run
 ```
-conda activate RF2NA
+conda activate RF2
 cd example
 ```
 

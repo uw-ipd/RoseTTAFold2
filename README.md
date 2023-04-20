@@ -54,17 +54,17 @@ conda activate RF2
 cd example
 ```
 
-#Example 1: predicting the structure of a monomer
+Example 1: predicting the structure of a monomer
 ```
 ../run_RF2.sh rcsb_pdb_7UGF.fasta -o 7UGF
 ```
 
-#Example 2: predicting the structure of a heterodimer with paired MSA
+Example 2: predicting the structure of a heterodimer with paired MSA
 ```
 ../run_RF2.sh rcsb_pdb_8HBN.fasta --paired -o 8HBN
 ```
 
-#Example 3: predicting the structure of a C6-symmetric homodimer
+Example 3: predicting the structure of a C6-symmetric homodimer
 ```
 ../run_RF2.sh rcsb_pdb_8GIH.fasta --symm C6 -o 8GIH
 ```

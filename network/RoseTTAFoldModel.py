@@ -4,7 +4,7 @@ from Embeddings import MSA_emb, Extra_emb, Templ_emb, Recycling
 from Track_module import IterativeSimulator
 from AuxiliaryPredictor import DistanceNetwork, MaskedTokenNetwork, ExpResolvedNetwork, LDDTNetwork, PAENetwork, BinderNetwork
 from util import INIT_CRDS
-from opt_einsum import contract as einsum
+from torch import einsum
 
 class RoseTTAFoldModule(nn.Module):
     def __init__(self, n_extra_block=4, n_main_block=8, n_ref_block=4,\

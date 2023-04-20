@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from opt_einsum import contract as einsum
+from torch import einsum
 from util_module import init_lecun_normal
 
 class FeedForwardLayer(nn.Module):

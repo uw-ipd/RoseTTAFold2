@@ -47,10 +47,24 @@ def parse_a3m(filename, max_seq=5000):
             continue
 
         # remove lowercase letters and append to MSA
-        msa.append(line.translate(table))
+        msa_i = line.translate(table)
+        msas_i = msa_i.split('/')
+
+        if (len(msa)==0):
+            # first seq
+            Ls = [len(x) for x in msas_i]
+            msa = [[s] for s in msas_i]
+        else:
+            nchains = len(msas_i)
+            isgood = all([ len(msa[i][0]) == len(msas_i[i]) for i in range(nchains) ])
+            if isgood:
+                for i in range(nchains):
+                    msa[i].append(msas_i[i])
+            else:
+                print ("Len error", filename, len(msa[0]) )
 
         # sequence length
-        L = len(msa[-1])
+        L = sum(Ls)
 
         # 0 - match or gap; 1 - insertion
         a = np.array([0 if c.isupper() or c=='-' else 1 for c in line])
@@ -71,12 +85,17 @@ def parse_a3m(filename, max_seq=5000):
             i[pos] = num
 
         ins.append(i)
-        if len(msa) == max_seq:
+
+        if (len(msa[0]) >= max_seq):
             break
+
+
+    # concatenate
+    msa = [np.array([list(s) for s in t], dtype='|S1').view(np.uint8) for t in msa]
+    msa = np.concatenate(msa,axis=-1)
 
     # convert letters into numbers
     alphabet = np.array(list("ARNDCQEGHILKMFPSTWYV-"), dtype='|S1').view(np.uint8)
-    msa = np.array([list(s) for s in msa], dtype='|S1').view(np.uint8)
     for i in range(alphabet.shape[0]):
         msa[msa == alphabet[i]] = i
 
@@ -84,8 +103,7 @@ def parse_a3m(filename, max_seq=5000):
     msa[msa > 20] = 20
 
     ins = np.array(ins, dtype=np.uint8)
-
-    return msa,ins
+    return msa,ins,Ls
 
 
 # read and extract xyz coords of N,Ca,C atoms

@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from opt_einsum import contract as einsum
+from torch import einsum
 import torch.utils.checkpoint as checkpoint
 from util import get_Cb
 from util_module import Dropout, create_custom_forward, rbf, init_lecun_normal

@@ -2,7 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from opt_einsum import contract as einsum
+from torch import einsum
 import copy
 import dgl
 from util import *

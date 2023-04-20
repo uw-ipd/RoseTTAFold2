@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from opt_einsum import contract as einsum
+from torch import einsum
 from chemical import aa2num
 from util import rigid_from_3_points
 from kinematics import get_dih

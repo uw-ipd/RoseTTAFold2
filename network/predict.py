@@ -16,8 +16,28 @@ from util_module import XYZConverter
 from symmetry import symm_subunit_matrix, find_symm_subs, get_symm_map
 import json
 
+# suppress dgl warning w/ newest pytorch
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
+
+def get_args():
+    import argparse
+    parser = argparse.ArgumentParser(description="RoseTTAFold2NA")
+    parser.add_argument("-inputs", help="R|Input data in format A:B:C, with\n"
+         "   A = multiple sequence alignment file\n"
+         "   B = hhpred hhr file\n"
+         "   C = hhpred atab file\n"
+         "Spaces seperate multiple inputs.  The last two arguments may be omitted\n",
+         default=None, nargs='+')
+    parser.add_argument("-db", help="HHpred database location", default=None)
+    parser.add_argument("-prefix", help="Output prefix", type=str, default="S")
+    parser.add_argument("-symm", default="C1", help="Symmetry.  IF PROVIDED, 'input' should cover the asymmetric unit")
+    parser.add_argument("-model", default=None, help="Model weights")
+    args = parser.parse_args()
+    return args
+
 MAX_CYCLE = 20
-NMODEL = 10
+NMODEL = 1
 NBIN = [37, 37, 37, 19]
 SUBCROP = -1
 
@@ -108,14 +128,9 @@ def merge_a3m_homo(msa_orig, ins_orig, nmer):
     return msa, ins
 
 class Predictor():
-    def __init__(self, model_dir=None, device="cuda:0"):
-        if model_dir == None:
-            self.model_dir = "%s/models"%(os.path.dirname(os.path.abspath(__file__)))
-        else:
-            self.model_dir = model_dir
-        #
+    def __init__(self, model_weights, device="cuda:0"):
         # define model name
-        self.model_name = "BFF"
+        self.model_weights = model_weights
         self.device = device
         self.active_fn = nn.Softmax(dim=1)
 
@@ -123,7 +138,8 @@ class Predictor():
         self.model = RoseTTAFoldModule(
             **MODEL_PARAM
         ).to(self.device)
-        could_load = self.load_model(self.model_name)
+
+        could_load = self.load_model(self.model_weights)
         if not could_load:
             print ("ERROR: failed to load model")
             sys.exit()
@@ -133,43 +149,103 @@ class Predictor():
         self.aamask = util.allatom_mask.to(self.device)
         self.lddt_bins = torch.linspace(1.0/50, 1.0, 50, device=self.device) - 1.0/100
 
-        self.xyz_converter = XYZConverter().to(self.device)
+        self.xyz_converter = XYZConverter()
 
 
-    def load_model(self, model_name, suffix='last'):
-        chk_fn = "%s/%s_%s.pt"%(self.model_dir, model_name, suffix)
-        if not os.path.exists(chk_fn):
+    def load_model(self, model_weights):
+        if not os.path.exists(model_weights):
             return False
-        checkpoint = torch.load(chk_fn, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'], strict=True)
+        checkpoint = torch.load(model_weights, map_location=self.device)
+        self.model.load_state_dict(checkpoint['model_state_dict'])
         return True
 
-    def predict(self, a3m_fn, out_prefix, inpdb, symm="C1"):
+    def predict(self, inputs, out_prefix, symm="C1", ffdb=None, n_templ=4):
         symmids,symmRs,symmmeta,symmoffset = symm_subunit_matrix(symm)
-
         O = symmids.shape[0]
 
-        msa_orig, ins_orig = parse_a3m(a3m_fn)
-        msa_orig, ins_orig = torch.tensor(msa_orig), torch.tensor(ins_orig)
-        N, L = msa_orig.shape
+        ###
+        # pass 1, combined MSA
+        Ls_blocked, Ls, msas, inss = [], [], [], []
+        for i,seq_i in enumerate(inputs):
+            fseq_i =  seq_i.split(':')
+            a3m_i = fseq_i[0]
+            msa_i, ins_i, Ls_i = parse_a3m(a3m_i)
+            msa_i = torch.tensor(msa_i).long()
+            ins_i = torch.tensor(ins_i).long()
+            if (msa_i.shape[0] > MAXSEQ):
+                idxs_tokeep = np.random.permutation(msa_i.shape[0])[:MAXSEQ]
+                idxs_tokeep[0] = 0  # keep best
+                msa_i = msa_i[idxs_tokeep]
+                ins_i = ins_i[idxs_tokeep]
 
-        # dummy template
-        xyz_t_baseline = INIT_CRDS.reshape(1,1,27,3).repeat(1,L,1,1) + torch.rand(1,L,1,3)*5.0 + symmoffset*L**(1/3)
-        xyz_t = xyz_t_baseline
-        mask_t = torch.full((1, L, 27), False) 
-        t1d = torch.nn.functional.one_hot(torch.full((1, L), 20).long(), num_classes=21).float() # all gaps
-        t1d = torch.cat((t1d, torch.zeros((1,L,1)).float()), -1)
+            msas.append(msa_i)
+            inss.append(ins_i)
+            Ls.extend(Ls_i)
+            Ls_blocked.append(msa_i.shape[0])
 
-        if (inpdb is not None):
-            xyz_t,_ = read_template_pdb(L,inpdb)
-        xyz_t[torch.isnan(xyz_t)] = xyz_t_baseline[torch.isnan(xyz_t)]
+        msa_orig = {'msa':msas[0],'ins':inss[0]}
+        for i in range(1,len(Ls_blocked)):
+            msa_orig = merge_a3m_hetero(msa_orig, {'msa':msas[i],'ins':inss[i]}, [sum(Ls_blocked[:i]),Ls_blocked[i]])
+        msa_orig, ins_orig = msa_orig['msa'], msa_orig['ins']
 
-        # find contacting subunits
-        xyz_t, symmsub = find_symm_subs(xyz_t[:,:L],symmRs,symmmeta)
+        ###
+        # pass 2, templates
+        L = sum(Ls)
+        xyz_t = INIT_CRDS.reshape(1,1,27,3).repeat(n_templ,L,1,1) + torch.rand(n_templ,L,1,3)*5.0 - 2.5
+        mask_t = torch.full((n_templ, L, 27), False) 
+        t1d = torch.nn.functional.one_hot(torch.full((n_templ, L), 20).long(), num_classes=21).float() # all gaps
+        t1d = torch.cat((t1d, torch.zeros((n_templ,L,1)).float()), -1)
+
+        maxtmpl=1
+        for i,seq_i in enumerate(inputs):
+            fseq_i =  seq_i.split(':')
+            if (len(fseq_i) == 3):
+                hhr_i,atab_i = fseq_i[1:3]
+                startres,stopres = sum(Ls_blocked[:i]), sum(Ls_blocked[:(i+1)])
+                xyz_t_i, t1d_i, mask_t_i = read_templates(Ls_blocked[i], ffdb, hhr_i, atab_i, n_templ=n_templ)
+                ntmpl_i = xyz_t_i.shape[0]
+                maxtmpl = max(maxtmpl, ntmpl_i)
+                xyz_t[:ntmpl_i,startres:stopres,:,:] = xyz_t_i
+                t1d[:ntmpl_i,startres:stopres,:] = t1d_i
+                mask_t[:ntmpl_i,startres:stopres,:] = mask_t_i
+
+        same_chain = torch.zeros((1,L,L), dtype=torch.bool, device=xyz_t.device)
+        stopres = 0
+        for i in range(1,len(Ls)):
+            startres,stopres = sum(Ls[:(i-1)]), sum(Ls[:i])
+            same_chain[:,startres:stopres,startres:stopres] = True
+        same_chain[:,stopres:,stopres:] = True
+
+        # template features
+        xyz_t = xyz_t[:maxtmpl].float().unsqueeze(0)
+        mask_t = mask_t[:maxtmpl].unsqueeze(0)
+        t1d = t1d[:maxtmpl].float().unsqueeze(0)
+
+        mask_t_2d = mask_t[:,:,:,:3].all(dim=-1) # (B, T, L)
+        mask_t_2d = mask_t_2d[:,:,None]*mask_t_2d[:,:,:,None] # (B, T, L, L)
+        mask_t_2d = mask_t_2d.float()*same_chain.float()[:,None] # (ignore inter-chain region)
+        t2d = xyz_to_t2d(xyz_t, mask_t_2d)
+
+        seq_tmp = t1d[...,:-1].argmax(dim=-1).reshape(-1,L)
+        alpha, _, alpha_mask, _ = self.xyz_converter.get_torsions(xyz_t.reshape(-1,L,27,3), seq_tmp, mask_in=mask_t.reshape(-1,L,27))
+        alpha_mask = torch.logical_and(alpha_mask, ~torch.isnan(alpha[...,0]))
+
+        alpha[torch.isnan(alpha)] = 0.0
+        alpha = alpha.reshape(1,-1,L,10,2)
+        alpha_mask = alpha_mask.reshape(1,-1,L,10,1)
+        alpha_t = torch.cat((alpha, alpha_mask), dim=-1).reshape(1, -1, L, 3*10)
+
+        xyz_prev = xyz_t[:,0]
+        mask_prev = mask_t[:,0]
+
+        ###
+        # pass 3, symmetry
+        xyz_prev, symmsub = find_symm_subs(xyz_prev[:,:L],symmRs,symmmeta)
 
         Osub = symmsub.shape[0]
-        mask_t = mask_t.repeat(1,Osub,1)
-        t1d = t1d.repeat(1,Osub,1)
+        mask_t = mask_t.repeat(1,1,Osub,1)
+        xyz_t = xyz_t.repeat(1,1,Osub,1,1)
+        t1d = t1d.repeat(1,1,Osub,1)
 
         # symmetrize msa
         effL = Osub*L
@@ -185,29 +261,6 @@ class Predictor():
             same_chain[:,o_i*L:(i+1)*L,o_i*L:(o_i+1)*L] = 1
             idx_pdb[:,o_i*L:(i+1)*L] += 100*o_i
 
-        # template features
-        xyz_t = xyz_t.float().unsqueeze(0).to(self.device)
-        mask_t = mask_t.unsqueeze(0).to(self.device)
-        t1d = t1d.float().unsqueeze(0).to(self.device)
-        mask_t_2d = mask_t[:,:,:,:3].all(dim=-1) # (B, T, L)
-        mask_t_2d = mask_t_2d[:,:,None]*mask_t_2d[:,:,:,None] # (B, T, L, L)
-        mask_t_2d = mask_t_2d*same_chain.float()[:,None]
-
-        t2d = xyz_to_t2d(xyz_t, mask_t_2d)
-
-        # get torsion angles from templates
-        seq_tmp = t1d[...,:-1].argmax(dim=-1).reshape(-1,L)
-        alpha, _, alpha_mask, _ = self.xyz_converter.get_torsions(xyz_t.reshape(-1,L,27,3), seq_tmp, mask_in=mask_t.reshape(-1,L,27))
-        alpha_mask = torch.logical_and(alpha_mask, ~torch.isnan(alpha[...,0]))
-        alpha[torch.isnan(alpha)] = 0.0
-        alpha = alpha.reshape(1,-1,effL,10,2)
-        alpha_mask = alpha_mask.reshape(1,-1,effL,10,1)
-        alpha_t = torch.cat((alpha, alpha_mask), dim=-1).reshape(1, -1, effL, 30)
-
-        T = xyz_t.shape[1]
-        xyz_prev = xyz_t[:,0]
-        mask_prev = mask_t[:,0]
-
         self.model.eval()
         for i_trial in range(NMODEL):
             #if os.path.exists("%s_%02d_init.pdb"%(out_prefix, i_trial)):
@@ -222,14 +275,11 @@ class Predictor():
             torch.cuda.empty_cache()
 
     def run_prediction(self, msa_orig, ins_orig, t1d, t2d, xyz_t, alpha_t, mask_t, xyz_prev, mask_prev, same_chain, idx_pdb, symmids, symmsub, symmRs, symmmeta, out_prefix):
+        self.xyz_converter = self.xyz_converter.to(self.device)
+
         with torch.no_grad():
-            if msa_orig.shape[0] > 10000:
-                msa, ins = MSABlockDeletion(msa_orig, ins_orig)
-                msa = msa.long().to(self.device) # (N, L)
-                ins = ins.long().to(self.device)
-            else:
-                msa = msa_orig.long().to(self.device) # (N, L)
-                ins = ins_orig.long().to(self.device)
+            msa = msa_orig.long().to(self.device) # (N, L)
+            ins = ins_orig.long().to(self.device)
 
             print ("Input size", msa.shape, ins.shape)
             N, L = msa.shape[:2]
@@ -239,7 +289,15 @@ class Predictor():
 
             B = 1
             #
+            t1d = t1d.to(self.device)
+            t2d = t2d.to(self.device)
             idx_pdb = idx_pdb.to(self.device)
+            xyz_t = xyz_t.to(self.device)
+            mask_t = mask_t.to(self.device)
+            alpha_t = alpha_t.to(self.device)
+            xyz_prev = xyz_prev.to(self.device)
+            mask_prev = mask_prev.to(self.device)
+            same_chain = same_chain.to(self.device)
             symmids = symmids.to(self.device)
             symmsub = symmsub.to(self.device)
             symmRs = symmRs.to(self.device)
@@ -394,19 +452,24 @@ class Predictor():
                                     1.0, Bfacts[i] ) )
                                 ctr += 1
 
-def get_args():
-    #DB="/home/robetta/rosetta_server_beta/external/databases/trRosetta/pdb100_2021Mar03/pdb100_2021Mar03"
-    DB = "/projects/ml/TrRosetta/pdb100_2022Apr19/pdb100_2022Apr19"
-    import argparse
-    parser = argparse.ArgumentParser(description="RoseTTAFold: Protein structure prediction with 3-track attentions on 1D, 2D, and 3D features")
-    parser.add_argument("-a3m_fn", required=True)
-    parser.add_argument("-out_prefix", required=True)
-    parser.add_argument("-symm", required=False, default="C1")
-    parser.add_argument("-inpdb", required=False, default=None)
-    args = parser.parse_args()
-    return args
 
 if __name__ == "__main__":
     args = get_args()
-    pred = Predictor()
-    pred.predict(args.a3m_fn, args.out_prefix, args.inpdb, symm=args.symm)
+
+    if (args.db is not None):
+        FFDB = args.db
+        FFindexDB = namedtuple("FFindexDB", "index, data")
+        ffdb = FFindexDB(read_index(FFDB+'_pdb.ffindex'),
+                         read_data(FFDB+'_pdb.ffdata'))
+    else:
+        ffdb = None
+
+    if (torch.cuda.is_available()):
+        print ("Running on GPU")
+        pred = Predictor(args.model, torch.device("cuda:0"))
+    else:
+        print ("Running on CPU")
+        pred = Predictor(args.model, torch.device("cpu"))
+
+    pred.predict(inputs=args.inputs, out_prefix=args.prefix, symm=args.symm, ffdb=ffdb)
+

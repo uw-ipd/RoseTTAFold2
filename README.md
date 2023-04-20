@@ -47,12 +47,40 @@ wget https://files.ipd.uw.edu/pub/RoseTTAFold/pdb100_2021Mar03.tar.gz
 tar xfz pdb100_2021Mar03.tar.gz
 ```
 
-## Usage
+## Examples
+Prepare to run
 ```
 conda activate RF2NA
 cd example
-../run_RF2.sh S_ protein.fa
 ```
 
-## Expected outputs
-You will get a prediction with estimated per-residue LDDT in the B-factor column (`models/model_00.pdb`)
+#Example 1: predicting the structure of a monomer
+```
+../run_RF2.sh rcsb_pdb_7UGF.fasta -o 7UGF
+```
+
+#Example 2: predicting the structure of a heterodimer with paired MSA
+```
+../run_RF2.sh rcsb_pdb_8HBN.fasta --paired -o 8HBN
+```
+
+#Example 3: predicting the structure of a C6-symmetric homodimer
+```
+../run_RF2.sh rcsb_pdb_8GIH.fasta --symm C6 -o 8GIH
+```
+
+# Expected outputs
+Predictions will be output to the folder 1XXX/models/model_final.pdb.  B-factors show the predicted LDDT.
+A json file and .npz file give additional accuracy information.
+
+## Additional information
+The script `run_RF2.sh` has a few extra options that may be useful for runs:
+```
+Usage: run_RF2.sh [-o|--outdir name] [-s|--symm symmgroup] [-p|--pair] [-h|--hhpred] input1.fasta ... inputN.fasta
+Options:
+     -o|--outdir name: Write to this output directory
+     -s|--symm symmgroup (BETA): run with the specified spacegroup.
+                              Understands Cn, Dn, T, I, O (with n an integer).
+     -p|--pair: If more than one chain is provided, pair MSAs based on taxonomy ID.
+     -h|--hhpred: Run hhpred to generate templates
+```

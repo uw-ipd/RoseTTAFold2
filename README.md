@@ -61,7 +61,7 @@ cd example
 
 ### Example 2: predicting the structure of a heterodimer with paired MSA
 ```
-../run_RF2.sh rcsb_pdb_8HBN.fasta --paired -o 8HBN
+../run_RF2.sh rcsb_pdb_8HBN.fasta --pair -o 8HBN
 ```
 
 ### Example 3: predicting the structure of a C6-symmetric homodimer

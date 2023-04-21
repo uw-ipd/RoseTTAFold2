@@ -1,0 +1,2 @@
+pdbx is a parser module in python for structures of the protein data bank in the mmcif format
+source: https://github.com/soedinglab/pdbx

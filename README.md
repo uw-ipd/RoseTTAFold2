@@ -66,7 +66,12 @@ cd example
 
 ### Example 3: predicting the structure of a C6-symmetric homodimer
 ```
-../run_RF2.sh rcsb_pdb_8GIH.fasta --symm C6 -o 8GIH
+../run_RF2.sh rcsb_pdb_7YTB.fasta --symm C6 -o 7YTB
+```
+
+### Example 4: predicting the structure of a C4-symmetric heterodimer (A<sub>4</sub>B<sub>4</sub> complex) with paired MSA
+```
+../run_RF2.sh rcsb_pdb_8GZ7.fasta --symm C4 --pair -o 8GZ7
 ```
 
 ### Expected outputs

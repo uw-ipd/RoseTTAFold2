@@ -221,11 +221,6 @@ class Predictor():
         mask_t = mask_t[:maxtmpl].unsqueeze(0)
         t1d = t1d[:maxtmpl].float().unsqueeze(0)
 
-        mask_t_2d = mask_t[:,:,:,:3].all(dim=-1) # (B, T, L)
-        mask_t_2d = mask_t_2d[:,:,None]*mask_t_2d[:,:,:,None] # (B, T, L, L)
-        mask_t_2d = mask_t_2d.float()*same_chain.float()[:,None] # (ignore inter-chain region)
-        t2d = xyz_to_t2d(xyz_t, mask_t_2d)
-
         seq_tmp = t1d[...,:-1].argmax(dim=-1).reshape(-1,L)
         alpha, _, alpha_mask, _ = self.xyz_converter.get_torsions(xyz_t.reshape(-1,L,27,3), seq_tmp, mask_in=mask_t.reshape(-1,L,27))
         alpha_mask = torch.logical_and(alpha_mask, ~torch.isnan(alpha[...,0]))
@@ -235,15 +230,15 @@ class Predictor():
         alpha_mask = alpha_mask.reshape(1,-1,L,10,1)
         alpha_t = torch.cat((alpha, alpha_mask), dim=-1).reshape(1, -1, L, 3*10)
 
-        xyz_prev = xyz_t[:,0]
-        mask_prev = mask_t[:,0]
-
         ###
         # pass 3, symmetry
+        xyz_prev = xyz_t[:,0]
         xyz_prev, symmsub = find_symm_subs(xyz_prev[:,:L],symmRs,symmmeta)
 
         Osub = symmsub.shape[0]
         mask_t = mask_t.repeat(1,1,Osub,1)
+        alpha_t = alpha_t.repeat(1,1,Osub,1)
+        mask_prev = mask_t[:,0]
         xyz_t = xyz_t.repeat(1,1,Osub,1,1)
         t1d = t1d.repeat(1,1,Osub,1)
 
@@ -255,11 +250,20 @@ class Predictor():
         # index
         idx_pdb = torch.arange(Osub*L)[None,:]
 
-        same_chain = torch.zeros((1,Osub*L,Osub*L), device=self.device).long()
+        same_chain = torch.zeros((1,Osub*L,Osub*L)).long()
+        i_start = 0
         for o_i in range(Osub):
-            i = symmsub[o_i]
-            same_chain[:,o_i*L:(i+1)*L,o_i*L:(o_i+1)*L] = 1
-            idx_pdb[:,o_i*L:(i+1)*L] += 100*o_i
+            for li in Ls:
+                i_stop = i_start + li
+                idx_pdb[:,i_stop:] += 100
+                same_chain[:,i_start:i_stop,i_start:i_stop] = 1
+                i_start = i_stop
+
+        mask_t_2d = mask_t[:,:,:,:3].all(dim=-1) # (B, T, L)
+        mask_t_2d = mask_t_2d[:,:,None]*mask_t_2d[:,:,:,None] # (B, T, L, L)
+        mask_t_2d = mask_t_2d.float()*same_chain.float()[:,None] # (ignore inter-chain region)
+        t2d = xyz_to_t2d(xyz_t, mask_t_2d)
+
 
         self.model.eval()
         for i_trial in range(NMODEL):
@@ -356,7 +360,7 @@ class Predictor():
                 pred_lddt = pred_lddt.sum(dim=1)
                 pae = pae_unbin(logits_pae)
                 print ("RECYCLE", i_cycle, pred_lddt.mean(), pae.mean(), best_lddt.mean())
-                self.write_pdb(seq[0], xyz_prev[0], Bfacts=pred_lddt[0], prefix="%s_cycle_%02d"%(out_prefix, i_cycle), chainlen=Lasu)
+                #self.write_pdb(seq[0], xyz_prev[0], Bfacts=pred_lddt[0], prefix="%s_cycle_%02d"%(out_prefix, i_cycle), chainlen=Lasu)
 
                 logit_s = [l.cpu() for l in logit_s]
                 logit_aa_s = [l.cpu() for l in logit_aa_s]
@@ -401,7 +405,7 @@ class Predictor():
         with open("%s.json"%(out_prefix), "w") as outfile:
             json.dump(outdata, outfile, indent=4)
 
-        self.write_pdb(seq_full[0], best_xyzfull[0], Bfacts=best_lddtfull[0], prefix="%s_init"%(out_prefix), chainlen=Lasu)
+        self.write_pdb(seq_full[0], best_xyzfull[0], Bfacts=best_lddtfull[0], prefix="%s_pred"%(out_prefix), chainlen=Lasu)
 
         prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
         np.savez_compressed("%s.npz"%(out_prefix), dist=prob_s[0].astype(np.float16), \

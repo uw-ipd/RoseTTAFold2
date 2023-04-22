@@ -116,7 +116,11 @@ do
     tag=`basename $i | sed -E 's/\.fasta$|\.fas$|\.fa$//'`
 
     proteinMSA $i $tag $hhpred
-    argstring+="$WDIR/$tag.msa0.a3m:$WDIR/$tag.hhr:$WDIR/$tag.atab "
+    argstring+="$WDIR/$tag.msa0.a3m"
+    if [[ $hhpred -eq 1 ]]; then
+        argstring+=":$WDIR/$tag.hhr:$WDIR/$tag.atab"
+    fi
+    argstring+=" "
     nP=$((nP+1))
 done
 
@@ -143,7 +147,7 @@ python $PIPEDIR/network/predict.py \
     -inputs $argstring \
     -prefix $WDIR/models/model \
     -model $PIPEDIR/network/weights/RF2_apr23.pt \
-    -db $HHDB 
-    -symm $symm 2> $WDIR/log/network.stderr 1> $WDIR/log/network.stdout 
+    -db $HHDB \
+    -symm $symm #2> $WDIR/log/network.stderr 1> $WDIR/log/network.stdout 
 
 echo "Done"

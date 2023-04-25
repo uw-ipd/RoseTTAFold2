@@ -358,7 +358,7 @@ class Predictor():
                 pred_lddt = pred_lddt.sum(dim=1)
                 pae = pae_unbin(logits_pae)
                 print ("RECYCLE", i_cycle, pred_lddt.mean(), pae.mean(), best_lddt.mean())
-                util.writepdb("%s_cycle_%02d.pdb"%(out_prefix, i_cycle), xyz_prev[0], seq[0], L_s, bfacts=100*pred_lddt[0])
+                #util.writepdb("%s_cycle_%02d.pdb"%(out_prefix, i_cycle), xyz_prev[0], seq[0], L_s, bfacts=100*pred_lddt[0])
 
                 logit_s = [l.cpu() for l in logit_s]
                 logit_aa_s = [l.cpu() for l in logit_aa_s]
@@ -389,6 +389,7 @@ class Predictor():
         for i in range(1,O):
             best_xyzfull[:,(i*Lasu):((i+1)*Lasu)] = torch.einsum('ij,braj->brai', symmRs[i], best_xyz[:,:Lasu])
             seq_full[:,(i*Lasu):((i+1)*Lasu)] = seq[:,:Lasu]
+            best_lddtfull[:,(i*Lasu):((i+1)*Lasu)] = best_lddt[:,:Lasu]
 
         outdata = {}
 

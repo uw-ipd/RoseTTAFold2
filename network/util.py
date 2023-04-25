@@ -137,52 +137,50 @@ def cross_product_matrix(u):
     return matrix
 
 # writepdb
-def writepdb(filename, atoms, seq, mask, idx_pdb=None, bfacts=None, min_bfac=0, max_bfac=1):
+def writepdb(filename, atoms, seq, Ls, idx_pdb=None, bfacts=None):
     f = open(filename,"w")
     ctr = 1
-    scpu = seq.cpu().squeeze()
-    atomscpu = atoms.cpu().squeeze()
+    scpu = seq.cpu().squeeze(0)
+    atomscpu = atoms.cpu().squeeze(0)
+
+    L = sum(Ls)
+    O = seq.shape[0]//L
+    Ls = Ls * O
+
     if bfacts is None:
         bfacts = torch.zeros(atomscpu.shape[0])
     if idx_pdb is None:
         idx_pdb = 1 + torch.arange(atomscpu.shape[0])
 
-    Bfacts = torch.clamp( bfacts.cpu(), min_bfac, max_bfac)
+    Bfacts = torch.clamp( bfacts.cpu(), 0, 100)
+    chn_idx, res_idx = 0, 0
     for i,s in enumerate(scpu):
-        if (len(atomscpu.shape)==2):
-            f.write ("%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"%(
-                    "ATOM", ctr, " CA ", num2aa[s], 
-                    "A", idx_pdb[i], atomscpu[i,0], atomscpu[i,1], atomscpu[i,2],
-                    1.0, Bfacts[i] ) )
-            ctr += 1
-        elif atomscpu.shape[1]==3:
-            for j,atm_j in enumerate([" N  "," CA "," C  "]):
-                f.write ("%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"%(
-                        "ATOM", ctr, atm_j, num2aa[s], 
-                        "A", idx_pdb[i], atomscpu[i,j,0], atomscpu[i,j,1], atomscpu[i,j,2],
-                        1.0, Bfacts[i] ) )
-                ctr += 1
-        else: 
-            natoms = atomscpu.shape[1]
-            if (natoms!=14 and natoms!=27):
-                print ('bad size!', atoms.shape)
-                assert(False)
-            atms = aa2long[s]
-            # his prot hack
-            if (s==8 and torch.linalg.norm( atomscpu[i,9,:]-atomscpu[i,5,:] ) < 1.7):
-                atms = (
-                    " N  "," CA "," C  "," O  "," CB "," CG "," NE2"," CD2"," CE1"," ND1",
-                      None,  None,  None,  None," H  "," HA ","1HB ","2HB "," HD2"," HE1",
-                    " HD1",  None,  None,  None,  None,  None,  None) # his_d
+        natoms = atomscpu.shape[-2]
+        if (natoms!=14 and natoms!=27):
+            print ('bad size!', atoms.shape)
+            assert(False)
 
-            for j,atm_j in enumerate(atms):
-                if not mask[i,j]: continue
-                if (j<natoms and atm_j is not None): # and not torch.isnan(atomscpu[i,j,:]).any()):
-                    f.write ("%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"%(
-                        "ATOM", ctr, atm_j, num2aa[s], 
-                        "A", idx_pdb[i], atomscpu[i,j,0], atomscpu[i,j,1], atomscpu[i,j,2],
-                        1.0, Bfacts[i] ) )
-                    ctr += 1
+        atms = aa2long[s]
+
+        # his protonation state hack
+        if (s==8 and torch.linalg.norm( atomscpu[i,9,:]-atomscpu[i,5,:] ) < 1.7):
+            atms = (
+                " N  "," CA "," C  "," O  "," CB "," CG "," NE2"," CD2"," CE1"," ND1",
+                  None,  None,  None,  None," H  "," HA ","1HB ","2HB "," HD2"," HE1",
+                " HD1",  None,  None,  None,  None,  None,  None) # his_d
+
+        for j,atm_j in enumerate(atms):
+            if (j<natoms and atm_j is not None and not torch.isnan(atomscpu[i,j,:]).any()):
+                f.write ("%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"%(
+                    "ATOM", ctr, atm_j, num2aa[s], 
+                    PDB_CHAIN_IDS[chn_idx], res_idx+1, atomscpu[i,j,0], atomscpu[i,j,1], atomscpu[i,j,2],
+                    1.0, Bfacts[i] ) )
+                ctr += 1
+
+        res_idx += 1
+        if (chn_idx < len(Ls) and res_idx == Ls[chn_idx]):
+            chn_idx += 1
+            res_idx = 0
 
 
 # resolve tip atom indices

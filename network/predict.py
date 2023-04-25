@@ -36,7 +36,7 @@ def get_args():
     args = parser.parse_args()
     return args
 
-MAX_CYCLE = 20
+MAX_CYCLE = 12
 NMODEL = 1
 NBIN = [37, 37, 37, 19]
 SUBCROP = -1
@@ -273,12 +273,12 @@ class Predictor():
             start_time = time.time()
             self.run_prediction(
                 msa_orig, ins_orig, t1d, t2d, xyz_t[:,:,:,1], alpha_t, mask_t_2d, xyz_prev, mask_prev, same_chain, idx_pdb,
-                symmids, symmsub, symmRs, symmmeta,  "%s_%02d"%(out_prefix, i_trial))
+                symmids, symmsub, symmRs, symmmeta,  Ls, "%s_%02d"%(out_prefix, i_trial))
             max_mem = torch.cuda.max_memory_allocated()/1e9
             print ("Memory used:", max_mem, "/ Time: %.2f sec"%(time.time()-start_time))
             torch.cuda.empty_cache()
 
-    def run_prediction(self, msa_orig, ins_orig, t1d, t2d, xyz_t, alpha_t, mask_t, xyz_prev, mask_prev, same_chain, idx_pdb, symmids, symmsub, symmRs, symmmeta, out_prefix):
+    def run_prediction(self, msa_orig, ins_orig, t1d, t2d, xyz_t, alpha_t, mask_t, xyz_prev, mask_prev, same_chain, idx_pdb, symmids, symmsub, symmRs, symmmeta, L_s, out_prefix):
         self.xyz_converter = self.xyz_converter.to(self.device)
 
         with torch.no_grad():
@@ -309,8 +309,6 @@ class Predictor():
             subsymms, _ = symmmeta
             for i in range(len(subsymms)):
                 subsymms[i] = subsymms[i].to(self.device)
-
-            #self.write_pdb(msa[0], xyz_prev[0,:,:3], prefix="%s_templ"%(out_prefix), chainlen=Lasu)
 
             msa_prev=None
             pair_prev=None
@@ -360,7 +358,7 @@ class Predictor():
                 pred_lddt = pred_lddt.sum(dim=1)
                 pae = pae_unbin(logits_pae)
                 print ("RECYCLE", i_cycle, pred_lddt.mean(), pae.mean(), best_lddt.mean())
-                #self.write_pdb(seq[0], xyz_prev[0], Bfacts=pred_lddt[0], prefix="%s_cycle_%02d"%(out_prefix, i_cycle), chainlen=Lasu)
+                util.writepdb("%s_cycle_%02d.pdb"%(out_prefix, i_cycle), xyz_prev[0], seq[0], L_s, bfacts=100*pred_lddt[0])
 
                 logit_s = [l.cpu() for l in logit_s]
                 logit_aa_s = [l.cpu() for l in logit_aa_s]
@@ -405,56 +403,12 @@ class Predictor():
         with open("%s.json"%(out_prefix), "w") as outfile:
             json.dump(outdata, outfile, indent=4)
 
-        self.write_pdb(seq_full[0], best_xyzfull[0], Bfacts=best_lddtfull[0], prefix="%s_pred"%(out_prefix), chainlen=Lasu)
+        util.writepdb("%s_pred.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
 
         prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
         np.savez_compressed("%s.npz"%(out_prefix), dist=prob_s[0].astype(np.float16), \
                             lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16))
 
-                    
-    def write_pdb(self, seq, atoms, Bfacts=None, prefix=None, chainlen=None):
-        L = len(seq)
-        if chainlen is None:
-            chainlen = L
-
-        filename = "%s.pdb"%prefix
-        ctr = 1
-        with open(filename, 'wt') as f:
-            if Bfacts == None:
-                Bfacts = np.zeros(L)
-            else:
-                Bfacts = torch.clamp( Bfacts, 0, 1)
-
-            chains="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz01234567"
-            for i,s in enumerate(seq):
-                i_seq = (i%chainlen)+1
-                chn = chains[i//chainlen]
-                if (len(atoms.shape)==2):
-                    if (not torch.any(torch.isnan(atoms[i]))):
-                        f.write ("%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"%(
-                                "ATOM", ctr%100000, " CA ", util.num2aa[s], 
-                                chn, i_seq, atoms[i,0], atoms[i,1], atoms[i,2],
-                                1.0, Bfacts[i] ) )
-                        ctr += 1
-
-                elif atoms.shape[1]==3:
-                    for j,atm_j in enumerate((" N  "," CA "," C  ")):
-                        if (not torch.any(torch.isnan(atoms[i,j]))):
-                            f.write ("%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"%(
-                                    "ATOM", ctr%100000, atm_j, util.num2aa[s], 
-                                    chn, i_seq, atoms[i,j,0], atoms[i,j,1], atoms[i,j,2],
-                                    1.0, Bfacts[i] ) )
-                            ctr += 1                
-                else:
-                    atms = util.aa2long[s]
-                    for j,atm_j in enumerate(atms):
-                        if (atm_j is not None):
-                            if (not torch.any(torch.isnan(atoms[i,j]))):
-                                f.write ("%-6s%5s %4s %3s %s%4d    %8.3f%8.3f%8.3f%6.2f%6.2f\n"%(
-                                    "ATOM", ctr%100000, atm_j, util.num2aa[s], 
-                                    chn, i_seq, atoms[i,j,0], atoms[i,j,1], atoms[i,j,2],
-                                    1.0, Bfacts[i] ) )
-                                ctr += 1
 
 
 if __name__ == "__main__":

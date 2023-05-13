@@ -3,6 +3,7 @@ import string
 import gzip
 import os
 import sys
+from pathlib import Path
 
 TABLE = str.maketrans(dict.fromkeys(string.ascii_lowercase))
 ALPHABET = np.array(list("ARNDCQEGHILKMFPSTWYV-"), dtype='|S1').view(np.uint8)
@@ -24,6 +25,7 @@ def read_a3m(fn):
     # read sequences in a3m file
     # only take one (having the highest seqID to query) per each taxID
     is_first = True
+    is_ignore = False
     tmp = {}
     if fn.split('.')[-1] == "gz":
         fp = gzip.open(fn, 'rt')
@@ -75,24 +77,64 @@ def read_a3m(fn):
     return query, a3m
 
 if len(sys.argv) == 1:
-    print ("USAGE: python make_paired_MSA_simple.py [a3m for chain A] [a3m for chain B] [output filename]")
+    print ("USAGE: python make_paired_MSA_simple.py [a3m*]")
     sys.exit()
 
-fnA = sys.argv[1]
-fnB = sys.argv[2]
-pair_fn = sys.argv[3]
-#
-queryA, a3mA = read_a3m(fnA)
-queryB, a3mB = read_a3m(fnB)
-wrt = '>query\n'
-wrt += queryA
-wrt += '/'
-wrt += queryB
-wrt += "\n"
-for taxA in a3mA:
-    if taxA in a3mB:
-        wrt += ">%s %s\n"%(a3mA[taxA][0], a3mB[taxA][0])
-        wrt += "%s/%s\n"%(a3mA[taxA][1], a3mB[taxA][1])
+tags = []
+query = {}
+a3m = {}
+for i,fn in enumerate(sys.argv[1:]):
+    tag = Path(fn).stem+'_'+str(i)
+    tags.append(tag)
+    #print ('Read',fn,'into',tag)
+    query[tag],a3m[tag] = read_a3m(fn)
 
-with open(pair_fn, 'wt') as fp:
-    fp.write(wrt)
+#wrt = '> query\n'
+#wrt += '/'.join([query[i] for i in tags])+'\n'
+paired_data = []
+paired_data.append( (9999,'query','/'.join([query[i] for i in tags])) )
+
+
+marked = {}
+for i in range(len(tags)):
+    fn1 = tags[i]
+
+    preseq = ''
+    for pre in range(i):
+        if (pre>0):
+            preseq += '/'
+        preseq += '-'*len(query[ tags[pre] ])
+
+    for tax in a3m[fn1]:
+        name = a3m[fn1][tax][0]
+        if (i>0):
+            seq = preseq+'/'+a3m[fn1][tax][1]
+        else:
+            seq = a3m[fn1][tax][1]
+        ct = 1
+
+        if (fn1+'.'+tax in marked):
+            continue
+
+        for j in range(i+1,len(tags)):
+            fn2 = tags[j]
+            if tax in a3m[fn2]:
+                name += ' '+a3m[fn2][tax][0]
+                seq += '/'
+                seq += a3m[fn2][tax][1]
+                marked[fn2+'.'+tax] = 1
+                ct+=1
+            else:
+                seq += '/'
+                seq += '-'*len(query[ fn2 ])
+
+        marked[fn1+'.'+tax] = 1
+        paired_data.append( (ct,name,seq) )
+
+        #wrt += '>'+name+'\n'
+        #wrt += seq+'\n'
+
+paired_data = sorted(paired_data, key=lambda x: x[0], reverse=True)
+for p in paired_data:
+    print ('>',p[1])
+    print (p[2])

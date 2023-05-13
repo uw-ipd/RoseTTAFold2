@@ -125,16 +125,21 @@ do
 done
 
 # Merge MSAs based on taxonomy ID
-# to do 1: generalize script to 3+ chains
-# to do 2: add individual chains' hhsearch template results
-if [ ${#fastas[@]} -eq 2 ] && [ $pair -eq 1 ]
+# to do: add individual chains' hhsearch template results
+if [ ${#fastas[@]} -ge 2 ] && [ $pair -eq 1 ]
 then
-    tag1=`basename ${fastas[0]} | sed -E 's/\.fasta$|\.fas$|\.fa$//'`
-    tag2=`basename ${fastas[1]} | sed -E 's/\.fasta$|\.fas$|\.fa$//'`
+    tag=''
+    cmdstr=''
+    for i in "${fastas[@]}"
+    do
+        tagi=`basename $i | sed -E 's/\.fasta$|\.fas$|\.fa$//'`
+        tag+=$tagi'.'
+        cmdstr+=$WDIR/$tagi.msa0.a3m' '
+    done
     echo "Creating merged MSA"
-    echo " -> Running command: python $PIPEDIR/input_prep/make_paired_MSA_simple.py $WDIR/$tag1.msa0.a3m $WDIR/$tag2.msa0.a3m $WDIR/$tag1.$tag2.a3m"
-    python $PIPEDIR/input_prep/make_paired_MSA_simple.py $WDIR/$tag1.msa0.a3m $WDIR/$tag2.msa0.a3m $WDIR/$tag1.$tag2.a3m #&> /dev/null 
-    argstring="$WDIR/$tag1.$tag2.a3m"
+    echo " -> Running command: python $PIPEDIR/input_prep/make_paired_MSA_simple.py $cmdstr > $WDIR/$tag""a3m"
+    python $PIPEDIR/input_prep/make_paired_MSA_simple.py $cmdstr > $WDIR/$tag"a3m"
+    argstring=$WDIR/$tag"a3m"
 fi
 
 # end-to-end prediction

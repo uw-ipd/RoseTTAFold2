@@ -160,6 +160,7 @@ class Predictor():
         return True
 
     def predict(self, inputs, out_prefix, symm="C1", ffdb=None, n_templ=4):
+        self.xyz_converter = self.xyz_converter.cpu()
         symmids,symmRs,symmmeta,symmoffset = symm_subunit_matrix(symm)
         O = symmids.shape[0]
 

@@ -14,6 +14,7 @@ from kinematics import xyz_to_c6d, xyz_to_t2d
 from chemical import INIT_CRDS
 from util_module import XYZConverter
 from symmetry import symm_subunit_matrix, find_symm_subs, get_symm_map
+from data_loader import merge_a3m_hetero
 import json
 
 # suppress dgl warning w/ newest pytorch

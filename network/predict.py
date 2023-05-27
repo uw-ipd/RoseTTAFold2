@@ -16,6 +16,7 @@ from util_module import XYZConverter
 from symmetry import symm_subunit_matrix, find_symm_subs, get_symm_map
 from data_loader import merge_a3m_hetero
 import json
+import random
 
 # suppress dgl warning w/ newest pytorch
 import warnings
@@ -37,7 +38,7 @@ def get_args():
     parser.add_argument("-prefix", default="S", type=str, help="Output file prefix [S]")
     parser.add_argument("-symm", default="C1", help="Symmetry group (Cn,Dn,T,O, or I).  If provided, 'input' should cover the asymmetric unit. [C1]")
     parser.add_argument("-model", default=default_model, help="Model weights. [weights/RF2_apr23.pt]")
-    parser.add_argument("-n_recycles", default=4, type=int, help="Number of recycles to use [4].")
+    parser.add_argument("-n_recycles", default=3, type=int, help="Number of recycles to use [3].")
     parser.add_argument("-n_models", default=1, type=int, help="Number of models to predict [1].")
     parser.add_argument("-subcrop", default=-1, type=int, help="Subcrop pair-to-pair updates. For very large models (>3000 residues) a subcrop of 800-1600 can improve structure accuracy and reduce runtime. A value of -1 means no subcropping. [-1]")
     parser.add_argument("-nseqs", default=256, type=int, help="The number of MSA sequences to sample in the main 1D track [256].")
@@ -96,21 +97,54 @@ def pae_unbin(pred_pae):
     pred_pae = nn.Softmax(dim=1)(pred_pae)
     return torch.sum(pae_bins[None,:,None,None]*pred_pae, dim=1)
 
-def merge_a3m_homo(msa_orig, ins_orig, nmer):
+def merge_a3m_homo(msa_orig, ins_orig, nmer, diag=False):
     N, L = msa_orig.shape[:2]
-    msa = torch.full((2*N-1, L*nmer), 20, dtype=msa_orig.dtype, device=msa_orig.device)
-    ins = torch.full((2*N-1, L*nmer), 0, dtype=ins_orig.dtype, device=msa_orig.device)
+    if diag:
 
-    msa[:N, :L] = msa_orig
-    ins[:N, :L] = ins_orig
-    start = L
+        # AAAAAA
+        # A-----
+        # -A----
+        # --A---
+        # ---A--
+        # ----A-
+        # -----A
 
-    for i_c in range(1,nmer):
-        msa[0, start:start+L] = msa_orig[0] 
-        msa[N:, start:start+L] = msa_orig[1:]
-        ins[0, start:start+L] = ins_orig[0]
-        ins[N:, start:start+L] = ins_orig[1:]
-        start += L
+        N = N - 1
+        new_N = 1 + N * nmer
+        new_L = L * nmer
+        msa = torch.full((new_N, new_L), 20, dtype=msa_orig.dtype, device=msa_orig.device)
+        ins = torch.full((new_N, new_L), 0, dtype=ins_orig.dtype, device=msa_orig.device)
+
+        start_L = 0
+        start_N = 1
+        for i_c in range(nmer):
+            msa[0, start_L:start_L+L] = msa_orig[0] 
+            msa[start_N:start_N+N, start_L:start_L+L] = msa_orig[1:]
+            ins[0, start_L:start_L+L] = ins_orig[0]
+            ins[start_N:start_N+N, start_L:start_L+L] = ins_orig[1:]
+            start_L += L
+            start_N += N
+    else:
+
+        # AAAAAA
+        # A-----
+        # -AAAAA
+
+        N, L = msa_orig.shape[:2]
+        msa = torch.full((2*N-1, L*nmer), 20, dtype=msa_orig.dtype, device=msa_orig.device)
+        ins = torch.full((2*N-1, L*nmer), 0, dtype=ins_orig.dtype, device=msa_orig.device)
+
+        msa[:N, :L] = msa_orig
+        ins[:N, :L] = ins_orig
+        start = L
+
+        for i_c in range(1,nmer):
+            msa[0, start:start+L] = msa_orig[0] 
+            msa[N:, start:start+L] = msa_orig[1:]
+            ins[0, start:start+L] = ins_orig[0]
+            ins[N:, start:start+L] = ins_orig[1:]
+            start += L        
+
     return msa, ins
 
 class Predictor():
@@ -148,7 +182,7 @@ class Predictor():
     def predict(
         self, inputs, out_prefix, symm="C1", ffdb=None,
         n_recycles=4, n_models=1, subcrop=-1, nseqs=256, nseqs_full=2048,
-        n_templ=4
+        n_templ=4, msa_mask=0.0,
     ):
         self.xyz_converter = self.xyz_converter.cpu()
         symmids,symmRs,symmmeta,symmoffset = symm_subunit_matrix(symm)
@@ -268,7 +302,8 @@ class Predictor():
                 xyz_prev, mask_prev, same_chain, idx_pdb,
                 symmids, symmsub, symmRs, symmmeta,  Ls, 
                 n_recycles, nseqs, nseqs_full, subcrop,
-                "%s_%02d"%(out_prefix, i_trial)
+                "%s_%02d"%(out_prefix, i_trial),
+                msa_mask=msa_mask
             )
             max_mem = torch.cuda.max_memory_allocated()/1e9
             print ("Memory used:", max_mem, "/ Time: %.2f sec"%(time.time()-start_time))
@@ -279,7 +314,8 @@ class Predictor():
         t1d, t2d, xyz_t, alpha_t, mask_t, 
         xyz_prev, mask_prev, same_chain, idx_pdb, 
         symmids, symmsub, symmRs, symmmeta, L_s, 
-        n_recycles, nseqs, nseqs_full, subcrop, out_prefix
+        n_recycles, nseqs, nseqs_full, subcrop, out_prefix,
+        msa_mask=0.0,
     ):
         self.xyz_converter = self.xyz_converter.to(self.device)
 
@@ -324,9 +360,9 @@ class Predictor():
             best_logit = None
             best_aa = None
             best_pae = None
-            for i_cycle in range(n_recycles):
+            for i_cycle in range(n_recycles + 1):
                 seq, msa_seed_orig, msa_seed, msa_extra, mask_msa = MSAFeaturize(
-                    msa, ins, p_mask=0.0, params={'MAXLAT': nseqs, 'MAXSEQ': nseqs_full, 'MAXCYCLE': 1})
+                    msa, ins, p_mask=msa_mask, params={'MAXLAT': nseqs, 'MAXSEQ': nseqs_full, 'MAXCYCLE': 1})
 
                 seq = seq.unsqueeze(0)
                 msa_seed = msa_seed.unsqueeze(0)

@@ -182,7 +182,7 @@ class Predictor():
     def predict(
         self, inputs, out_prefix, symm="C1", ffdb=None,
         n_recycles=4, n_models=1, subcrop=-1, nseqs=256, nseqs_full=2048,
-        n_templ=4, msa_mask=0.0,
+        n_templ=4, msa_mask=0.0, symm_diag=False
     ):
         self.xyz_converter = self.xyz_converter.cpu()
         symmids,symmRs,symmmeta,symmoffset = symm_subunit_matrix(symm)
@@ -270,7 +270,7 @@ class Predictor():
         # symmetrize msa
         effL = Osub*L
         if (Osub>1):
-            msa_orig, ins_orig = merge_a3m_homo(msa_orig, ins_orig, Osub)
+            msa_orig, ins_orig = merge_a3m_homo(msa_orig, ins_orig, Osub, diag=symm_diag)
 
         # index
         idx_pdb = torch.arange(Osub*L)[None,:]

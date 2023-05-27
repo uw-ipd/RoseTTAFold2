@@ -22,6 +22,9 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 def get_args():
+    default_model = os.path.dirname(__file__)+"/weights/RF2_apr23.pt"
+    print (default_model)
+
     import argparse
     parser = argparse.ArgumentParser(description="RoseTTAFold2NA")
     parser.add_argument("-inputs", help="R|Input data in format A:B:C, with\n"
@@ -29,21 +32,18 @@ def get_args():
          "   B = hhpred hhr file\n"
          "   C = hhpred atab file\n"
          "Spaces seperate multiple inputs.  The last two arguments may be omitted\n",
-         default=None, nargs='+')
+         required=True, nargs='+')
     parser.add_argument("-db", help="HHpred database location", default=None)
-    parser.add_argument("-prefix", help="Output prefix", type=str, default="S")
-    parser.add_argument("-symm", default="C1", help="Symmetry.  IF PROVIDED, 'input' should cover the asymmetric unit")
-    parser.add_argument("-model", default=None, help="Model weights")
+    parser.add_argument("-prefix", default="S", type=str, help="Output file prefix [S]")
+    parser.add_argument("-symm", default="C1", help="Symmetry group (Cn,Dn,T,O, or I).  If provided, 'input' should cover the asymmetric unit. [C1]")
+    parser.add_argument("-model", default=default_model, help="Model weights. [weights/RF2_apr23.pt]")
+    parser.add_argument("-n_recycles", default=4, type=int, help="Number of recycles to use [4].")
+    parser.add_argument("-n_models", default=1, type=int, help="Number of models to predict [1].")
+    parser.add_argument("-subcrop", default=-1, type=int, help="Subcrop pair-to-pair updates. For very large models (>3000 residues) a subcrop of 800-1600 can improve structure accuracy and reduce runtime. A value of -1 means no subcropping. [-1]")
+    parser.add_argument("-nseqs", default=256, type=int, help="The number of MSA sequences to sample in the main 1D track [256].")
+    parser.add_argument("-nseqs_full", default=2048, type=int, help="The number of MSA sequences to sample in the wide-MSA 1D track [2048].")
     args = parser.parse_args()
     return args
-
-MAX_CYCLE = 12
-NMODEL = 1
-NBIN = [37, 37, 37, 19]
-SUBCROP = -1
-
-MAXLAT=128
-MAXSEQ=1024
 
 MODEL_PARAM ={
         "n_extra_block": 4,
@@ -86,21 +86,6 @@ SE3_param_topk = {
         }
 MODEL_PARAM['SE3_param_full'] = SE3_param_full
 MODEL_PARAM['SE3_param_topk'] = SE3_param_topk
-
-#def merge_a3m_homo(msa_orig, ins_orig, nmer):
-#    N, L = msa_orig.shape[:2]
-#    msa = torch.full((1+(N-1)*nmer, L*nmer), 20, dtype=msa_orig.dtype, device=msa_orig.device)
-#    ins = torch.full((1+(N-1)*nmer, L*nmer), 0, dtype=ins_orig.dtype, device=msa_orig.device)
-#    start=0
-#    start2 = 1
-#    for i_c in range(nmer):
-#        msa[0, start:start+L] = msa_orig[0] 
-#        msa[start2:start2+(N-1), start:start+L] = msa_orig[1:]
-#        ins[0, start:start+L] = ins_orig[0]
-#        ins[start2:start2+(N-1), start:start+L] = ins_orig[1:]
-#        start += L
-#        start2 += (N-1)
-#    return msa, ins
 
 def pae_unbin(pred_pae):
     # calculate pae loss
@@ -160,7 +145,12 @@ class Predictor():
         self.model.load_state_dict(checkpoint['model_state_dict'])
         return True
 
-    def predict(self, inputs, out_prefix, symm="C1", ffdb=None, n_templ=4):
+    def predict(
+        self, inputs, out_prefix, symm="C1", ffdb=None,
+        n_recycles=4, n_models=1, subcrop=-1, nseqs=256, nseqs_full=2048,
+        n_templ=4
+    ):
+        self.xyz_converter = self.xyz_converter.cpu()
         symmids,symmRs,symmmeta,symmoffset = symm_subunit_matrix(symm)
         O = symmids.shape[0]
 
@@ -173,8 +163,8 @@ class Predictor():
             msa_i, ins_i, Ls_i = parse_a3m(a3m_i)
             msa_i = torch.tensor(msa_i).long()
             ins_i = torch.tensor(ins_i).long()
-            if (msa_i.shape[0] > MAXSEQ):
-                idxs_tokeep = np.random.permutation(msa_i.shape[0])[:MAXSEQ]
+            if (msa_i.shape[0] > nseqs_full):
+                idxs_tokeep = np.random.permutation(msa_i.shape[0])[:nseqs_full]
                 idxs_tokeep[0] = 0  # keep best
                 msa_i = msa_i[idxs_tokeep]
                 ins_i = ins_i[idxs_tokeep]
@@ -267,26 +257,37 @@ class Predictor():
 
 
         self.model.eval()
-        for i_trial in range(NMODEL):
+        for i_trial in range(n_models):
             #if os.path.exists("%s_%02d_init.pdb"%(out_prefix, i_trial)):
             #    continue
             torch.cuda.reset_peak_memory_stats()
             start_time = time.time()
             self.run_prediction(
-                msa_orig, ins_orig, t1d, t2d, xyz_t[:,:,:,1], alpha_t, mask_t_2d, xyz_prev, mask_prev, same_chain, idx_pdb,
-                symmids, symmsub, symmRs, symmmeta,  Ls, "%s_%02d"%(out_prefix, i_trial))
+                msa_orig, ins_orig, 
+                t1d, t2d, xyz_t[:,:,:,1], alpha_t, mask_t_2d, 
+                xyz_prev, mask_prev, same_chain, idx_pdb,
+                symmids, symmsub, symmRs, symmmeta,  Ls, 
+                n_recycles, nseqs, nseqs_full, subcrop,
+                "%s_%02d"%(out_prefix, i_trial)
+            )
             max_mem = torch.cuda.max_memory_allocated()/1e9
             print ("Memory used:", max_mem, "/ Time: %.2f sec"%(time.time()-start_time))
             torch.cuda.empty_cache()
 
-    def run_prediction(self, msa_orig, ins_orig, t1d, t2d, xyz_t, alpha_t, mask_t, xyz_prev, mask_prev, same_chain, idx_pdb, symmids, symmsub, symmRs, symmmeta, L_s, out_prefix):
+    def run_prediction(
+        self, msa_orig, ins_orig, 
+        t1d, t2d, xyz_t, alpha_t, mask_t, 
+        xyz_prev, mask_prev, same_chain, idx_pdb, 
+        symmids, symmsub, symmRs, symmmeta, L_s, 
+        n_recycles, nseqs, nseqs_full, subcrop, out_prefix
+    ):
         self.xyz_converter = self.xyz_converter.to(self.device)
 
         with torch.no_grad():
             msa = msa_orig.long().to(self.device) # (N, L)
             ins = ins_orig.long().to(self.device)
 
-            print ("Input size", msa.shape, ins.shape)
+            print ("Input size", msa.shape[1], msa.shape[0])
             N, L = msa.shape[:2]
             O = symmids.shape[0]
             Osub = symmsub.shape[0]
@@ -323,9 +324,9 @@ class Predictor():
             best_logit = None
             best_aa = None
             best_pae = None
-            for i_cycle in range(MAX_CYCLE):
+            for i_cycle in range(n_recycles):
                 seq, msa_seed_orig, msa_seed, msa_extra, mask_msa = MSAFeaturize(
-                    msa, ins, p_mask=0.0, params={'MAXLAT': MAXLAT, 'MAXSEQ': MAXSEQ, 'MAXCYCLE': 1})
+                    msa, ins, p_mask=0.0, params={'MAXLAT': nseqs, 'MAXSEQ': nseqs_full, 'MAXCYCLE': 1})
 
                 seq = seq.unsqueeze(0)
                 msa_seed = msa_seed.unsqueeze(0)
@@ -342,8 +343,7 @@ class Predictor():
                                                                msa_prev=msa_prev,
                                                                pair_prev=pair_prev,
                                                                state_prev=state_prev,
-                                                               p2p_crop=SUBCROP,
-                                                               #topk_crop=SUBCROP,
+                                                               p2p_crop=subcrop,
                                                                mask_recycle=mask_recycle,
                                                                symmids=symmids,
                                                                symmsub=symmsub,
@@ -431,5 +431,14 @@ if __name__ == "__main__":
         print ("Running on CPU")
         pred = Predictor(args.model, torch.device("cpu"))
 
-    pred.predict(inputs=args.inputs, out_prefix=args.prefix, symm=args.symm, ffdb=ffdb)
+    pred.predict(
+        inputs=args.inputs, 
+        out_prefix=args.prefix, 
+        symm=args.symm, 
+        n_recycles=args.n_recycles, 
+        n_models=args.n_models, 
+        subcrop=args.subcrop, 
+        nseqs=args.nseqs, 
+        nseqs_full=args.nseqs_full, 
+        ffdb=ffdb)
 

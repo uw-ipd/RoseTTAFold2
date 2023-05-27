@@ -358,7 +358,8 @@ class Predictor():
                 pred_lddt = nn.Softmax(dim=1)(pred_lddt) * self.lddt_bins[None,:,None]
                 pred_lddt = pred_lddt.sum(dim=1)
                 pae = pae_unbin(logits_pae)
-                print ("RECYCLE", i_cycle, pred_lddt.mean(), pae.mean(), best_lddt.mean())
+                print (f"recycle={i_cycle} plddt={pred_lddt.mean():.3f} pae={pae.mean():.3f}")
+
                 #util.writepdb("%s_cycle_%02d.pdb"%(out_prefix, i_cycle), xyz_prev[0], seq[0], L_s, bfacts=100*pred_lddt[0])
 
                 logit_s = [l.cpu() for l in logit_s]
@@ -408,8 +409,10 @@ class Predictor():
         util.writepdb("%s_pred.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
 
         prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
-        np.savez_compressed("%s.npz"%(out_prefix), dist=prob_s[0].astype(np.float16), \
-                            lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16))
+        np.savez_compressed("%s.npz"%(out_prefix),
+            dist=prob_s[0].astype(np.float16),
+            lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
+            pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
 
 
 

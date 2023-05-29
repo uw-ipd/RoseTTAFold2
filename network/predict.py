@@ -97,9 +97,17 @@ def pae_unbin(pred_pae):
     pred_pae = nn.Softmax(dim=1)(pred_pae)
     return torch.sum(pae_bins[None,:,None,None]*pred_pae, dim=1)
 
-def merge_a3m_homo(msa_orig, ins_orig, nmer, diag=False):
+def merge_a3m_homo(msa_orig, ins_orig, nmer, mode="default"):
     N, L = msa_orig.shape[:2]
-    if diag:
+    if mode == "repeat":
+
+        # AAAAAA
+        # AAAAAA
+
+        msa = torch.tile(msa_orig,(1,nmer))
+        ins = torch.tile(ins_orig,(1,nmer))
+
+    elif mode == "diag":
 
         # AAAAAA
         # A-----
@@ -130,7 +138,6 @@ def merge_a3m_homo(msa_orig, ins_orig, nmer, diag=False):
         # A-----
         # -AAAAA
 
-        N, L = msa_orig.shape[:2]
         msa = torch.full((2*N-1, L*nmer), 20, dtype=msa_orig.dtype, device=msa_orig.device)
         ins = torch.full((2*N-1, L*nmer), 0, dtype=ins_orig.dtype, device=msa_orig.device)
 
@@ -182,11 +189,9 @@ class Predictor():
     def predict(
         self, inputs, out_prefix, symm="C1", ffdb=None,
         n_recycles=4, n_models=1, subcrop=-1, nseqs=256, nseqs_full=2048,
-        n_templ=4, msa_mask=0.0, is_training=False, use_diag_msa=False
+        n_templ=4, msa_mask=0.0, is_training=False, msa_concat_mode="default"
     ):
         self.xyz_converter = self.xyz_converter.cpu()
-        symmids,symmRs,symmmeta,symmoffset = symm_subunit_matrix(symm)
-        O = symmids.shape[0]
 
         ###
         # pass 1, combined MSA
@@ -212,6 +217,17 @@ class Predictor():
         for i in range(1,len(Ls_blocked)):
             msa_orig = merge_a3m_hetero(msa_orig, {'msa':msas[i],'ins':inss[i]}, [sum(Ls_blocked[:i]),Ls_blocked[i]])
         msa_orig, ins_orig = msa_orig['msa'], msa_orig['ins']
+
+        # pseudo symmetry
+        if symm.startswith("X"):
+            Osub = int(symm[1:])
+            if Osub > 1:
+                msa_orig, ins_orig = merge_a3m_homo(msa_orig, ins_orig, Osub, mode=msa_concat_mode)
+                Ls = sum([Ls] * Osub,[])
+            symm = "C1"
+
+        symmids,symmRs,symmmeta,symmoffset = symm_subunit_matrix(symm)
+        O = symmids.shape[0]
 
         ###
         # pass 2, templates
@@ -270,7 +286,7 @@ class Predictor():
         # symmetrize msa
         effL = Osub*L
         if (Osub>1):
-            msa_orig, ins_orig = merge_a3m_homo(msa_orig, ins_orig, Osub, diag=use_diag_msa)
+            msa_orig, ins_orig = merge_a3m_homo(msa_orig, ins_orig, Osub, mode=msa_concat_mode)
 
         # index
         idx_pdb = torch.arange(Osub*L)[None,:]
@@ -308,8 +324,9 @@ class Predictor():
                 "%s_%02d"%(out_prefix, i_trial),
                 msa_mask=msa_mask
             )
-            max_mem = torch.cuda.max_memory_allocated()/1e9
-            print ("Memory used:", max_mem, "/ Time: %.2f sec"%(time.time()-start_time))
+            runtime = time.time() - start_time
+            vram = torch.cuda.max_memory_allocated() / 1e9
+            print(f"runtime={runtime:.2f} vram={vram:.2f}")
             torch.cuda.empty_cache()
 
     def run_prediction(
@@ -326,7 +343,7 @@ class Predictor():
             msa = msa_orig.long().to(self.device) # (N, L)
             ins = ins_orig.long().to(self.device)
 
-            print ("Input size", msa.shape[1], msa.shape[0])
+            print(f"N={msa.shape[0]} L={msa.shape[1]}")
             N, L = msa.shape[:2]
             O = symmids.shape[0]
             Osub = symmsub.shape[0]

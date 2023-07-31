@@ -19,6 +19,9 @@ HHDB="$PIPEDIR/pdb100_2021Mar03/pdb100_2021Mar03"
 CPU="8"  # number of CPUs to use
 MEM="64" # max memory (in GB)
 
+# Default value for CUDA_VISIBLE_DEVICES
+CUDA_VISIBLE_DEVICES=""  # Empty string means all GPUs are visible
+
 WDIR='rf2out'
 #mkdir -p $WDIR/log
 
@@ -55,10 +58,11 @@ symm="C1"
 pair=0
 hhpred=0
 fastas=()
+cuda_device=-1  # Default value, -1 means no specific GPU
 
 ## parse command line
-USAGESTRING="Usage: $(basename $0) [-o|--outdir name] [-s|--symm symmgroup] [-p|--pair] [-h|--hhpred] input1.fasta ... inputN.fasta"
-VALID_ARGS=$(getopt -o o:s:ph --long help,outdir:,symm:,pair,hhpred -- "$@")
+USAGESTRING="Usage: $(basename $0) [-o|--outdir name] [-s|--symm symmgroup] [-p|--pair] [-h|--hhpred] [-c|--cuda cuda_device] input1.fasta ... inputN.fasta"
+VALID_ARGS=$(getopt -o o:s:phc: --long help,outdir:,symm:,pair,hhpred,cuda: -- "$@")
 if [[ $? -ne 0 ]]; then
     exit 1;
 fi
@@ -73,6 +77,7 @@ while [ : ]; do
         echo "                              Understands Cn, Dn, T, I, O (with n an integer)."
         echo "     -p|--pair: If more than one chain is provided, pair MSAs based on taxonomy ID."
         echo "     -h|--hhpred: Run hhpred to generate templates"
+        echo "     -c|--cuda: Select a CUDA device to run on (Integer)"
         exit 1
         ;;
     -p | --pair)
@@ -91,12 +96,19 @@ while [ : ]; do
         WDIR="$2"
         shift 2
         ;;
+    -c | --cuda)
+        cuda_device="$2"
+        shift 2
+        ;;
     --)
-        shift; 
-        break 
+        shift;
+        break
         ;;
   esac
 done
+
+# Set CUDA_VISIBLE_DEVICES environment variable based on the provided cuda_device value
+export CUDA_VISIBLE_DEVICES="$cuda_device"
 
 mkdir -p $WDIR/log
 
@@ -153,6 +165,6 @@ python $PIPEDIR/network/predict.py \
     -prefix $WDIR/models/model \
     -model $PIPEDIR/network/weights/RF2_apr23.pt \
     -db $HHDB \
-    -symm $symm #2> $WDIR/log/network.stderr 1> $WDIR/log/network.stdout 
+    -symm $symm #2> $WDIR/log/network.stderr 1> $WDIR/log/network.stdout
 
 echo "Done"

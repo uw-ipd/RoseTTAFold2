@@ -10,7 +10,7 @@ from SE3_network import SE3TransformerWrapper
 from kinematics import normQ, avgQ, Qs2Rs, Rs2Qs
 from symmetry import get_symm_map
 
-from pytorch_memlab import LineProfiler, profile
+#from pytorch_memlab import LineProfiler, profile
 
 
 # Components for three-track blocks
@@ -558,7 +558,7 @@ class IterBlock(nn.Module):
                                SE3_param=SE3_param,
                                p_drop=p_drop)
 
-    @profile
+    #@profile
     def forward(self, msa, pair, R_in, T_in, xyz, state, idx, symmids, symmsub_in, symmsub, symmRs, symmmeta, use_checkpoint=False, topk=0, crop=-1):
         O,L = pair.shape[:2]
         xyzfull = xyz.view(1,O*L,3,3)
@@ -641,7 +641,7 @@ class IterativeSimulator(nn.Module):
         self.proj_state2 = init_lecun_normal(self.proj_state2)
         nn.init.zeros_(self.proj_state2.bias)
 
-    @profile
+    #@profile
     def forward(self, seq, msa, msa_full, pair, xyz_in, state, idx, symmids, symmsub, symmRs, symmmeta, use_checkpoint=False, p2p_crop=-1, topk_crop=-1):
         # input:
         #   seq: query sequence (B, L)

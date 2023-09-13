@@ -81,7 +81,8 @@ class RoseTTAFoldModule(nn.Module):
         #
         # add template embedding
         pair, state = self.templ_emb(t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, symmids=symmids)
-        
+
+
         # Predict coordinates from given inputs
         msa, pair, R, T, alpha, state, symmsub = self.simulator(
             seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, symmids, symmsub, symmRs, symmmeta,

@@ -10,6 +10,8 @@ from SE3_network import SE3TransformerWrapper
 from kinematics import normQ, avgQ, Qs2Rs, Rs2Qs
 from symmetry import get_symm_map
 
+from pytorch_memlab import LineProfiler, profile
+
 
 # Components for three-track blocks
 # 1. MSA -> MSA update (biased attention. bias from pair & structure)
@@ -83,6 +85,7 @@ class MSAPairStr2MSA(nn.Module):
         # prepare input bias feature by combining pair & coordinate info
         pair = self.norm_pair(pair)
         pair = pair + self.emb_rbf(rbf_feat)
+        pair = pair.to(dtype=msa.dtype)
         #
         # update query sequence feature (first sequence in the MSA) with feedbacks (state) from SE3
         state = self.norm_state(state)
@@ -321,12 +324,18 @@ def update_symm_Rs(Rs, Ts, Lasu, symmsub_in, symmsub, symmRs):
     def dist_error(R0,T0,Rs,Ts):
         B = Ts.shape[0]
         Tcom = Ts[:,:Lasu].mean(dim=1,keepdim=True)
-        Tcorr = torch.einsum('ij,brj->bri', R0, Ts[:,:Lasu]-Tcom) + Tcom + 10.0*T0[None,None,:]
+        Tcorr = torch.einsum('ij,brj->bri', R0, Ts[:,:Lasu]-Tcom) + Tcom + T0[None,None,:]
         Xsymm = torch.einsum('sij,brj->bsri', symmRs[symmsub], Tcorr).reshape(B,-1,3)
         Xtrue = Ts
         dsymm = torch.linalg.norm(Xsymm[:,:,None]-Xsymm[:,None,:], dim=-1)
         dtrue = torch.linalg.norm(Xtrue[:,:,None]-Xtrue[:,None,:], dim=-1)
-        return torch.clamp( torch.abs(dsymm-dtrue), max=10.0).mean()
+        return torch.abs(dsymm-dtrue).mean()
+
+    def Q2R(Q):
+        Qs = torch.cat((torch.ones((1),device=Q.device),Q),dim=-1)
+        Qs = normQ(Qs)
+        return Qs2Rs(Qs[None,:]).squeeze(0)
+        
 
     B = Ts.shape[0]
 
@@ -338,20 +347,25 @@ def update_symm_Rs(Rs, Ts, Lasu, symmsub_in, symmsub, symmRs):
     # symmetry correction 2: use minimization to minimize drms
     #with torch.enable_grad():
     #    T0 = torch.zeros(3,device=Ts.device).requires_grad_(True)
-    #    R0 = torch.eye(3,device=Ts.device).requires_grad_(True)
-    #    opt = torch.optim.SGD([T0,R0], lr=0.001)
+    #    Q0 = torch.zeros(3,device=Ts.device).requires_grad_(True)
     #
-    #    if (dist_error(R0,T0,symmRs[symmsub],Ts)>0.5):
-    #        for e in range(101):
-    #            loss = dist_error(R0,T0,symmRs[symmsub],Ts)
-    #            if (e%50 == 0):
-    #                print (e,loss)
-    #            opt.zero_grad()
-    #            loss.backward()
-    #            opt.step()
+    #    lbfgs = torch.optim.LBFGS([T0,Q0],
+    #                history_size=10, 
+    #                max_iter=4,
+    #                line_search_fn="strong_wolfe")
+    #    def closure():
+    #        lbfgs.zero_grad()
+    #        loss = dist_error(Q2R(Q0),T0,symmRs[symmsub],Ts)
+    #        loss.backward()
+    #        return loss
     #
+    #    for e in range(3):
+    #        loss = lbfgs.step(closure)
+
     #Tcom = Ts[:,:Lasu].mean(dim=1,keepdim=True)
-    #Ts = torch.einsum('ij,brj->bri', R0, Ts[:,:Lasu]-Tcom) +Tcom + 10.0*T0[None,None,:]
+    #Ts = torch.einsum('ij,brj->bri', Q2R(Q0), Ts[:,:Lasu]-Tcom) +Tcom + T0[None,None,:]
+    #Rs = torch.einsum('ij,brjk->brik', Q2R(Q0), Rs[:,:Lasu])
+    # end symm correction
 
     Rs = torch.einsum('sij,brjk,slk->bsril', symmRs[symmsub], Rs[:,:Lasu], symmRs[symmsub_in])
     Ts = torch.einsum('sij,brj->bsri', symmRs[symmsub], Ts[:,:Lasu])
@@ -463,9 +477,11 @@ class Str2Str(nn.Module):
         nn.init.zeros_(self.embed_edge1.bias)
         nn.init.zeros_(self.embed_edge2.bias)
     
-    @torch.cuda.amp.autocast(enabled=False)
-    def forward(self, msa, pair_in, R_in, T_in, xyz, state, idx_in, symmids, symmsub, symmRs, symmmeta, top_k=64, eps=1e-5):
+    #@torch.cuda.amp.autocast(enabled=False)
+    def forward(self, msa, pair, R_in, T_in, xyz, state, idx_in, symmids, symmsub, symmRs, symmmeta, top_k=64, eps=1e-5):
         B, N, L = msa.shape[:3]
+
+        dtype = msa.dtype
 
         # process msa & state features
         seq = self.norm_msa(msa[:,0])
@@ -478,23 +494,24 @@ class Str2Str(nn.Module):
         node = node.reshape(B*L, -1, 1)
 
         # pair
-        pair_in = self.norm_pair(pair_in)
+        pair = self.norm_pair(pair).to(dtype)
 
         # get edge features
-        neighbor = get_seqsep(idx_in)
         rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1])).reshape(B,L,L,-1)
-        rbf_feat = torch.cat((rbf_feat, neighbor), dim=-1)
-        edge = self.embed_edge1(pair_in) + self.embed_edge2(rbf_feat)
+        rbf_feat = torch.cat((rbf_feat, get_seqsep(idx_in)), dim=-1)
+        edge = self.embed_edge1(pair) + self.embed_edge2(rbf_feat)
         edge = edge + self.ff_edge(edge)
         edge = self.norm_edge(edge)
+        rbf_feat = None
 
         # define graph
         G, edge_feats = make_topk_graph(xyz[:,:,1,:].detach(), edge, idx_in, top_k=top_k)
+        edge = None
 
         # extra L1 features (CA-N and CA-C vectors)
         l1_feats = torch.stack((xyz[:,:,0,:], xyz[:,:,2,:]), dim=-2)
         l1_feats = l1_feats - xyz[:,:,1,:].unsqueeze(2)
-        l1_feats = l1_feats.reshape(B*L, -1, 3)
+        l1_feats = l1_feats.reshape(B*L, -1, 3).float()
 
         # apply SE(3) Transformer & update coordinates
         shift = self.se3(G, node, l1_feats, edge_feats)
@@ -541,33 +558,34 @@ class IterBlock(nn.Module):
                                SE3_param=SE3_param,
                                p_drop=p_drop)
 
+    @profile
     def forward(self, msa, pair, R_in, T_in, xyz, state, idx, symmids, symmsub_in, symmsub, symmRs, symmmeta, use_checkpoint=False, topk=0, crop=-1):
-        #rbf_feat = rbf(torch.cdist(xyz[:,:,1,:], xyz[:,:,1,:])) + self.pos(idx)
         O,L = pair.shape[:2]
         xyzfull = xyz.view(1,O*L,3,3)
         rbf_feat = rbf(
             torch.cdist(xyzfull[:,:,1,:], xyzfull[:,:L,1,:])
         ).reshape(O,L,L,-1) + self.pos(idx, O)
+        rbf_feat = rbf_feat.half()
 
         if use_checkpoint:
             msa = checkpoint.checkpoint(create_custom_forward(self.msa2msa), msa, pair, rbf_feat, state, symmids, symmsub)
             pair = checkpoint.checkpoint(create_custom_forward(self.msa2pair), msa, pair, symmids, symmsub)
             pair = checkpoint.checkpoint(create_custom_forward(self.pair2pair), pair, rbf_feat, state, crop, symmids, symmsub)
             R, T, state, alpha = checkpoint.checkpoint(create_custom_forward(self.str2str, top_k=topk, symmmeta=symmmeta), 
-                msa.float(), pair.float(), R_in.float(), T_in.float(), xyz.float(), state.float(), idx, symmids, symmsub, symmRs)
+                msa, pair, R_in, T_in, xyz, state, idx, symmids, symmsub, symmRs)
+            #    msa.float(), pair.float(), R_in.float(), T_in.float(), xyz.float(), state.float(), idx, symmids, symmsub, symmRs)
         else:
             msa = self.msa2msa(msa, pair, rbf_feat, state, symmids, symmsub)
             pair = self.msa2pair(msa, pair, symmids, symmsub)
             pair = self.pair2pair(pair, rbf_feat, state, crop, symmids, symmsub)
             R, T, state, alpha = self.str2str(
-                msa.float(), pair.float(), R_in.float(), T_in.float(), xyz.float(), state.float(), idx, symmids, symmsub, symmRs, symmmeta, top_k=topk) 
+                msa, pair, R_in, T_in, xyz, state, idx, symmids, symmsub, symmRs, symmmeta, top_k=topk) 
+            #    msa.float(), pair.float(), R_in.float(), T_in.float(), xyz.float(), state.float(), idx, symmids, symmsub, symmRs, symmmeta, top_k=topk) 
 
         # update contacting subunits
         # symmetrize pair features
         if symmsub is not None and symmsub.shape[0]>1:
-            #print ('x1', R.shape, T.shape, pair.shape)
             R, T, pair, symmsub = update_symm_subs(R, T, pair, symmids, symmsub_in, symmsub, symmRs, symmmeta)
-            #print ('x2', R.shape, T.shape, pair.shape)
 
         return msa, pair, R, T, state, alpha, symmsub
 
@@ -623,6 +641,7 @@ class IterativeSimulator(nn.Module):
         self.proj_state2 = init_lecun_normal(self.proj_state2)
         nn.init.zeros_(self.proj_state2.bias)
 
+    @profile
     def forward(self, seq, msa, msa_full, pair, xyz_in, state, idx, symmids, symmsub, symmRs, symmmeta, use_checkpoint=False, p2p_crop=-1, topk_crop=-1):
         # input:
         #   seq: query sequence (B, L)
@@ -676,7 +695,7 @@ class IterativeSimulator(nn.Module):
             R_s.append(R_in)
             T_s.append(T_in)
             alpha_s.append(alpha)
-       
+
         state = self.proj_state2(state)
         for i_m in range(self.n_ref_block):
             R_in = R_in.detach()

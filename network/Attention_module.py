@@ -24,10 +24,22 @@ class FeedForwardLayer(nn.Module):
         nn.init.zeros_(self.linear2.weight)
         nn.init.zeros_(self.linear2.bias)
     
-    def forward(self, src):
-        src = self.norm(src)
-        src = self.linear2(self.dropout(F.relu_(self.linear1(src))))
-        return src
+    def forward(self, src, stride=64):
+        # a bit hacky.  L is always the -2 dimension so stripe there
+        L = src.shape[-2]
+        dtype = src.dtype
+
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
+
+        out = torch.zeros_like(src)
+        for i in range((L-1)//STRIDE+1):
+          cols = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+          out_i = self.norm(src[...,cols,:])
+          out[...,cols,:] = self.linear2(self.dropout(F.relu_(self.linear1(out_i)))).to(dtype=dtype)
+        return out
 
 class Attention(nn.Module):
     # calculate multi-head attention
@@ -183,6 +195,7 @@ class MSARowAttentionWithBias(nn.Module):
         self.scaling = 1/math.sqrt(d_hidden)
         self.h = n_head
         self.dim = d_hidden
+        self.dim_out = d_msa
 
         self.reset_parameter()
 
@@ -203,69 +216,52 @@ class MSARowAttentionWithBias(nn.Module):
         nn.init.zeros_(self.to_out.weight)
         nn.init.zeros_(self.to_out.bias)
 
-    def forward(self, msa, pair, sym=None): # TODO: make this as tied-attention
+    def forward(self, msa, pair, stride_n=64, stride_l=64): # TODO: make this as tied-attention
         B, N, L = msa.shape[:3]
-        O = pair.shape[0]
-        if (O==1):
-            msa = self.norm_msa(msa)
-            pair = self.norm_pair(pair)
-        
-            seq_weight = self.seq_weight(msa) # (B, N, L, h, 1)
-            query = self.to_q(msa).reshape(B, N, L, self.h, self.dim)
-            key = self.to_k(msa).reshape(B, N, L, self.h, self.dim)
-            value = self.to_v(msa).reshape(B, N, L, self.h, self.dim)
-            bias = self.to_b(pair) # (B, L, L, h)
-            gate = torch.sigmoid(self.to_g(msa))
-        
-            query = query * seq_weight.expand(-1, -1, -1, -1, self.dim)
-            key = key * self.scaling
-            attn = einsum('bsqhd,bskhd->bqkh', query, key)
-            attn = attn + bias
-            attn = F.softmax(attn, dim=-2)
-        
-            out = einsum('bqkh,bskhd->bsqhd', attn, value).reshape(B, N, L, -1)
-            out = gate * out
-        
-            out = self.to_out(out)
+        dtype = msa.dtype
 
-        else:
-            _, N, L = msa.shape[:3]
-            O = pair.shape[0]
-            #
-            if (sym is None):
-                sym = torch.tensor([[0]],device=msa.device)
-            #
-            msa = self.norm_msa(msa)
-            pair = self.norm_pair(pair)
-            #
-            seq_weight = self.seq_weight(msa) # (B, N, L, h, 1)
-            query = self.to_q(msa).reshape(O, N, L, self.h, self.dim)
-            key = self.to_k(msa).reshape(O, N, L, self.h, self.dim)
-            value = self.to_v(msa).reshape(O, N, L, self.h, self.dim)
-            bias = self.to_b(pair) # (B, L, L, h)
-            gate = torch.sigmoid(self.to_g(msa))
-            #
-            query = query * seq_weight.expand(-1, -1, -1, -1, self.dim)
+        msa = self.norm_msa(msa).to(dtype=dtype)
+        pair = self.norm_pair(pair).to(dtype=dtype)
+
+        # fd reduce memory in inference
+        STRIDE_N, STRIDE_L = N, L
+        if (not self.training and stride_n>0):
+            STRIDE_N = stride_n
+        if (not self.training and stride_l>0):
+            STRIDE_L = stride_l
+
+        attn = torch.zeros((B,L,L,self.h), device=pair.device, dtype=pair.dtype)
+        for i in range((N-1)//STRIDE_N+1):
+            rows = torch.arange(i*STRIDE_N, min((i+1)*STRIDE_N, N))
+
+            query = self.to_q(msa[:,rows]).reshape(B, -1, L, self.h, self.dim)
+            seq_weight_i = self.seq_weight(msa[:,rows])
+            query *= seq_weight_i.expand(-1, -1, -1, -1, self.dim)
+            key = self.to_k(msa[:,rows]).reshape(B, -1, L, self.h, self.dim)
             key = key * self.scaling
 
-            attn=torch.zeros((O,L,L,self.h), device=pair.device)
-            for i in range(O):
-                attn[i] = torch.einsum('sqhd,skhd->qkh', query[sym[0,0]], key[sym[0,i]]) # tied attention
-            attn = attn + bias
+            attn += einsum('bnihk,bnjhk->bijh', query, key) # tied attention
 
-            # softmax over dims 0 & 2
-            attn = F.softmax(
-                attn.transpose(1,2).reshape(O*L,L,self.h), dim=0
-            ).reshape(O,L,L,self.h).transpose(1,2)
+        for i in range((L-1)//STRIDE_L+1):
+            rows = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L))
+            attn[:,rows] += self.to_b(pair[:,rows]) # (B, STRIDE, L, h)
 
-            #
-            out=torch.zeros((O,N,L,self.h,self.dim), device=pair.device)
-            for i in range(O):
-                out[i] = torch.einsum('bqkh,bskhd->sqhd', attn, value[sym[i,:]]) # tied attention
-            out = gate * out.reshape(O,N,L,-1)
-            out = self.to_out(out)
+        attn = F.softmax(attn, dim=-2) # (B, L, L, h)
 
-        return out
+        out = torch.zeros((B,N,L,self.h*self.dim), device=pair.device, dtype=pair.dtype)
+        for i in range((L-1)//STRIDE_L+1):
+            slices = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L)) # rows in value, cols in out
+            value = self.to_v(msa[:,:,slices]).reshape(B, N, -1, self.h, self.dim)
+            out += einsum('bijh,bnjhd->bnihd', attn[:,:,slices], value).reshape(B, N, L, -1)
+
+        outg = torch.zeros((B,N,L,self.dim_out), device=pair.device, dtype=pair.dtype)
+        for i in range((L-1)//STRIDE_L+1):
+            slices = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L)) # rows in value, cols in out
+            gate_i = torch.sigmoid(self.to_g(msa[:,:,slices])) # (B, N, L, h*dim)
+            out[:,:,slices] *= gate_i
+            outg[:,:,slices] = self.to_out( out[:,:,slices] )
+
+        return outg
 
 
 class MSAColAttention(nn.Module):
@@ -282,6 +278,7 @@ class MSAColAttention(nn.Module):
         self.scaling = 1/math.sqrt(d_hidden)
         self.h = n_head
         self.dim = d_hidden
+        self.dim_out = d_msa
         
         self.reset_parameter()
 
@@ -299,24 +296,34 @@ class MSAColAttention(nn.Module):
         nn.init.zeros_(self.to_out.weight)
         nn.init.zeros_(self.to_out.bias)
 
-    def forward(self, msa):
+    def forward(self, msa, stride=64):
         B, N, L = msa.shape[:3]
-        #
-        msa = self.norm_msa(msa)
-        #
-        query = self.to_q(msa).reshape(B, N, L, self.h, self.dim)
-        key = self.to_k(msa).reshape(B, N, L, self.h, self.dim)
-        value = self.to_v(msa).reshape(B, N, L, self.h, self.dim)
-        gate = torch.sigmoid(self.to_g(msa))
-        #
-        query = query * self.scaling
-        attn = einsum('bqihd,bkihd->bihqk', query, key)
-        attn = F.softmax(attn, dim=-1)
-        #
-        out = einsum('bihqk,bkihd->bqihd', attn, value).reshape(B, N, L, -1)
-        out = gate * out
-        #
-        out = self.to_out(out)
+        dtype = msa.dtype
+
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
+
+        out = torch.zeros((B,N,L,self.dim_out), device=msa.device, dtype=msa.dtype)
+        for i in range((L-1)//STRIDE+1):
+            cols = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+
+            msa_i = self.norm_msa(msa[:,:,cols]).to(dtype=dtype)
+            query_i = self.to_q(msa_i).reshape(B, N, -1, self.h, self.dim)
+            key_i = self.to_k(msa_i).reshape(B, N, -1, self.h, self.dim)
+            value_i = self.to_v(msa_i).reshape(B, N, -1, self.h, self.dim)
+            gate_i = torch.sigmoid(self.to_g(msa_i))
+
+            query_i = query_i * self.scaling
+            attn_i = einsum('bqihd,bkihd->bihqk', query_i, key_i)
+            attn_i = F.softmax(attn_i, dim=-1)
+
+            out_i = einsum('bihqk,bkihd->bqihd', attn_i, value_i).reshape(B, N, -1, self.dim_out)
+            out_i = gate_i * out_i
+            #
+            out[:,:,cols] = self.to_out(out_i)
+
         return out
 
 class MSAColGlobalAttention(nn.Module):
@@ -353,7 +360,8 @@ class MSAColGlobalAttention(nn.Module):
     def forward(self, msa):
         B, N, L = msa.shape[:3]
         #
-        msa = self.norm_msa(msa)
+        dtype = msa.dtype
+        msa = self.norm_msa(msa).to(dtype=dtype)
         #
         query = self.to_q(msa).reshape(B, N, L, self.h, self.dim)
         query = query.mean(dim=1) # (B, L, h, dim)
@@ -412,80 +420,56 @@ class BiasedAxialAttention(nn.Module):
         nn.init.zeros_(self.to_out.weight)
         nn.init.zeros_(self.to_out.bias)
 
-    def forward(self, pair, bias, sym=None, stride=-1):
-        O, L = pair.shape[:2] # after subunit mask is applied
+    def forward(self, pair, bias, stride=32):
+        B, L = pair.shape[:2] # after subunit mask is applied
 
-        if O==1 or sym is None or sym.shape[0]!=O: # asymm mode
-            # pair: (B, L, L, d_pair)
-            if self.is_row:
-                pair = pair.permute(0,2,1,3)
-                bias = bias.permute(0,2,1,3)
+        # pair: (B, L, L, d_pair)
+        if self.is_row:
+            pair = pair.permute(0,2,1,3)
+            bias = bias.permute(0,2,1,3)
 
-            pair = self.norm_pair(pair)
-            bias = self.norm_bias(bias)
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
 
-            query = self.to_q(pair).reshape(O, L, L, self.h, self.dim)
-            key = self.to_k(pair).reshape(O, L, L, self.h, self.dim)
-            value = self.to_v(pair).reshape(O, L, L, self.h, self.dim)
-            bias = self.to_b(bias) # (B, L, L, h)
-            gate = torch.sigmoid(self.to_g(pair)) # (B, L, L, h*dim) 
-        
-            query = query * self.scaling
+        attn = torch.zeros((B,L,L,self.h), device=pair.device, dtype=pair.dtype)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+
+            pair_i = self.norm_pair(pair[:,rows])
+            query = self.to_q(pair_i).reshape(B, -1, L, self.h, self.dim)
+            query *= self.scaling
+            key = self.to_k(pair_i).reshape(B, -1, L, self.h, self.dim)
             key = key / L # normalize for tied attention
-            attn = einsum('bnihk,bnjhk->bijh', query, key) # tied attention
-            attn = attn + bias
-            attn = F.softmax(attn, dim=-2) # (B, L, L, h)
-        
-            out = einsum('bijh,bnjhd->bnihd', attn, value).reshape(O, L, L, -1)
-            out = gate * out
-        
-            out = self.to_out(out)
-            if self.is_row:
-                out = out.permute(0,2,1,3)
 
-        else:
+            attn += einsum('bnihk,bnjhk->bijh', query, key) # tied attention
 
-            # symmetric version
-            if self.is_row:
-                pair = pair[sym[0,:]].permute(0,2,1,3)
-                bias = bias[sym[0,:]].permute(0,2,1,3)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            bias_i = self.norm_bias(bias[:,rows]).to(dtype=bias.dtype)
+            attn[:,rows] += self.to_b(bias_i) # (B, STRIDE, L, h)
 
-            pair = self.norm_pair(pair)
-            bias = self.norm_bias(bias)
+        attn = F.softmax(attn, dim=-2) # (B, L, L, h)
+        out = torch.zeros((B,L,L,self.h*self.dim), device=pair.device, dtype=pair.dtype)
+        for i in range((L-1)//STRIDE+1):
+            slices = torch.arange(i*STRIDE, min((i+1)*STRIDE, L)) # rows in value, cols in out
+            pair_i = self.norm_pair(pair[:,:,slices])
+            value = self.to_v(pair_i).reshape(B, L, -1, self.h, self.dim)
+            out += einsum('bijh,bnjhd->bnihd', attn[:,:,slices], value).reshape(B, L, L, -1)
 
-            query = self.to_q(pair).reshape(O, L, L, self.h, self.dim)
-            key = self.to_k(pair).reshape(O, L, L, self.h, self.dim)
-            value = self.to_v(pair).reshape(O, L, L, self.h, self.dim)
-            bias = self.to_b(bias) # (B, L, L, h)
-            gate = torch.sigmoid(self.to_g(pair)) # (B, L, L, h*dim) 
+        outg = torch.zeros((B,L,L,self.dim_out), device=pair.device, dtype=pair.dtype)
+        for i in range((L-1)//STRIDE+1):
+            slices = torch.arange(i*STRIDE, min((i+1)*STRIDE, L)) # rows in value, cols in out
+            pair_i = self.norm_pair(pair[:,:,slices])
+            gate_i = torch.sigmoid(self.to_g(pair_i)) # (B, L, L, h*dim)
+            out[:,:,slices] *= gate_i
+            outg[:,:,slices] = self.to_out( out[:,:,slices] )
 
-            query = query * self.scaling
-            key = key / (O*L) # normalize for tied attention
+        if self.is_row:
+            outg = outg.permute(0,2,1,3)
 
-            attn=torch.zeros((O,L,L,self.h), device=pair.device)
-            for i in range(O):
-                attn[i] = torch.einsum('bnihk,bnjhk->ijh', query[sym[:,i]], key[sym[:,0]]) # tied attention
-            #attn = einsum('bnihk,bnjhk->bijh', query, key) # tied attention
-        
-            attn = attn + bias # apply bias
-
-            # softmax over dims 0 & 2
-            attn = F.softmax(
-                attn.transpose(1,2).reshape(O*L,L,self.h), dim=0
-            ).reshape(O,L,L,self.h).transpose(1,2)
-
-            out=torch.zeros((O,L,L,self.h,self.dim), device=pair.device)
-            for i in range(O):
-                out[i] = torch.einsum('bijh,bnjhd->nihd', attn[sym[:,i]], value) # tied attention
-            #out = einsum('bijh,bnjhd->bnihd', attn, value).reshape(O, L, L, -1)
-
-            out = gate * out.reshape(O,L,L,-1)
-            out = self.to_out(out)
-
-            if self.is_row:
-                out = out[sym[0,:]].permute(0,2,1,3)
-
-        return out
+        return outg
 
 class TriangleMultiplication(nn.Module):
     def __init__(self, d_pair, d_hidden=128, outgoing=True):
@@ -501,6 +485,7 @@ class TriangleMultiplication(nn.Module):
         self.out_proj = nn.Linear(d_hidden, d_pair)
 
         self.d_hidden = d_hidden
+        self.d_out = d_pair
 
         self.outgoing = outgoing
         
@@ -529,51 +514,50 @@ class TriangleMultiplication(nn.Module):
         nn.init.zeros_(self.out_proj.weight)
         nn.init.zeros_(self.out_proj.bias)
     
-    def forward(self, pair, sym=None):
-        pair = self.norm(pair)
-        O,L = pair.shape[:2]
+    def forward(self, pair, stride=256):
+        B,L = pair.shape[:2]
 
-        if O==1 or sym is None or sym.shape[0]!=O: # asymm mode
-            left = self.left_proj(pair) # (B, L, L, d_h)
-            left_gate = torch.sigmoid(self.left_gate(pair))
-            left = left_gate * left
-        
-            right = self.right_proj(pair) # (B, L, L, d_h)
-            right_gate = torch.sigmoid(self.right_gate(pair))
-            right = right_gate * right
-        
-            if self.outgoing:
-                out = einsum('bikd,bjkd->bijd', left, right/float(L))
-            else:
-                out = einsum('bkid,bkjd->bijd', left, right/float(L))
-            out = self.norm_out(out)
-            out = self.out_proj(out)
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
 
-            gate = torch.sigmoid(self.gate(pair)) # (B, L, L, d_pair)
-            out = gate * out
+        outg = torch.zeros((B,L,L,self.d_out), device=pair.device, dtype=pair.dtype)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            for j in range((L-1)//STRIDE+1):
+              cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L))
 
-        else:
-            left = self.left_proj(pair) # (B, L, L, d_h)
-            left_gate = torch.sigmoid(self.left_gate(pair))
-            left = left_gate * left
-        
-            right = self.right_proj(pair) # (B, L, L, d_h)
-            right_gate = torch.sigmoid(self.right_gate(pair))
-            right = right_gate * right
-        
-            if self.outgoing:
-                out=torch.zeros((O,L,L,self.d_hidden), device=pair.device)
-                for i in range(O):
-                    out[i] = torch.einsum('bikd,bjkd->ijd', left[sym[i,:]], right[sym[0,:]]/float(O*L)) # tied attention
-            else:
-                out=torch.zeros((O,L,L,self.d_hidden), device=pair.device)
-                for i in range(O):
-                    out[i] = torch.einsum('bkid,bkjd->ijd', left[sym[:,i]], right[sym[:,0]]/float(O*L)) # tied attention
+              if self.outgoing:
+                  pair_i = self.norm(pair[:,rows,:])
 
-            out = self.norm_out(out)
-            out = self.out_proj(out)
+                  left = self.left_proj(pair_i) # (B, L, L, d_h)
+                  left_gate = torch.sigmoid(self.left_gate(pair_i))
+                  left = left_gate * left
+    
+                  pair_i = self.norm(pair[:,cols,:])
+                  right = self.right_proj(pair_i) # (B, L, L, d_h)
+                  right_gate = torch.sigmoid(self.right_gate(pair_i))
+                  right = right_gate * right
+    
+                  out = einsum('bikd,bjkd->bijd', left, right/float(L))
+              else:
+                  pair_i = self.norm(pair[:,:,rows])
+                  left = self.left_proj(pair_i) # (B, L, L, d_h)
+                  left_gate = torch.sigmoid(self.left_gate(pair_i))
+                  left = left_gate * left
+    
+                  pair_i = self.norm(pair[:,:,cols])
+                  right = self.right_proj(pair_i) # (B, L, L, d_h)
+                  right_gate = torch.sigmoid(self.right_gate(pair_i))
+                  right = right_gate * right
+    
+                  out = einsum('bkid,bkjd->bijd', left, right/float(L))
 
-            gate = torch.sigmoid(self.gate(pair)) # (B, L, L, d_pair)
-            out = gate * out
+              out = self.norm_out(out)
+              out = self.out_proj(out)
 
-        return out
+              gate = torch.sigmoid(self.gate(pair[:,rows[:,None],cols[None,:]])) # (B, L, L, d_pair)
+              outg[:,rows[:,None],cols[None,:]] = gate * out
+
+        return outg

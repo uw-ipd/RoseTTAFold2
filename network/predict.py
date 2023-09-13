@@ -22,6 +22,9 @@ import random
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
+# fd temp for testing
+#torch.cuda.set_per_process_memory_fraction(15360/32510, 0)
+
 def get_args():
     default_model = os.path.dirname(__file__)+"/weights/RF2_apr23.pt"
     print (default_model)
@@ -208,10 +211,11 @@ class Predictor():
                 msa_i = msa_i[idxs_tokeep]
                 ins_i = ins_i[idxs_tokeep]
 
+
             msas.append(msa_i)
             inss.append(ins_i)
             Ls.extend(Ls_i)
-            Ls_blocked.append(msa_i.shape[0])
+            Ls_blocked.append(msa_i.shape[1])
 
         msa_orig = {'msa':msas[0],'ins':inss[0]}
         for i in range(1,len(Ls_blocked)):
@@ -305,7 +309,6 @@ class Predictor():
         mask_t_2d = mask_t_2d.float()*same_chain.float()[:,None] # (ignore inter-chain region)
         t2d = xyz_to_t2d(xyz_t, mask_t_2d)
 
-
         if is_training:
             self.model.train()
         else:
@@ -389,8 +392,14 @@ class Predictor():
                 msa_extra = msa_extra.unsqueeze(0)
 
                 with torch.cuda.amp.autocast(True):
+                    #fd memory savings
+                    msa_seed = msa_seed.half()
+                    msa_extra = msa_extra.half()
+                    t1d = t1d.half()
+                    t2d = t2d.half()
+
                     logit_s, logit_aa_s, _, logits_pae, p_bind, xyz_prev, alpha, symmsub, pred_lddt, msa_prev, pair_prev, state_prev = self.model(
-                                                               msa_seed.half(), msa_extra.half(),
+                                                               msa_seed, msa_extra,
                                                                seq, xyz_prev, 
                                                                idx_pdb,
                                                                t1d=t1d, t2d=t2d, xyz_t=xyz_t,

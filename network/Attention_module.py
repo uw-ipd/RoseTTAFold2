@@ -489,7 +489,7 @@ class TriangleMultiplication(nn.Module):
         if (not self.training and stride>0):
             STRIDE = stride
 
-        outg = torch.zeros((B,L,L,self.d_out), device=pair.device, dtype=pair.dtype)
+        out = torch.zeros((B,L,L,self.d_out), device=pair.device, dtype=pair.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
             for j in range((L-1)//STRIDE+1):
@@ -497,7 +497,6 @@ class TriangleMultiplication(nn.Module):
 
               if self.outgoing:
                   pair_i = self.norm(pair[:,rows,:])
-
                   left = self.left_proj(pair_i) # (B, L, L, d_h)
                   left_gate = torch.sigmoid(self.left_gate(pair_i))
                   left = left_gate * left
@@ -507,7 +506,7 @@ class TriangleMultiplication(nn.Module):
                   right_gate = torch.sigmoid(self.right_gate(pair_i))
                   right = right_gate * right
     
-                  out = einsum('bikd,bjkd->bijd', left, right/float(L))
+                  out_ij = einsum('bikd,bjkd->bijd', left, right/float(L))
               else:
                   pair_i = self.norm(pair[:,:,rows])
                   left = self.left_proj(pair_i) # (B, L, L, d_h)
@@ -519,12 +518,13 @@ class TriangleMultiplication(nn.Module):
                   right_gate = torch.sigmoid(self.right_gate(pair_i))
                   right = right_gate * right
     
-                  out = einsum('bkid,bkjd->bijd', left, right/float(L))
+                  out_ij = einsum('bkid,bkjd->bijd', left, right/float(L))
 
-              out = self.norm_out(out)
-              out = self.out_proj(out)
+              out_ij = self.norm_out(out_ij)
+              out_ij = self.out_proj(out_ij)
 
-              gate = torch.sigmoid(self.gate(pair[:,rows[:,None],cols[None,:]])) # (B, L, L, d_pair)
-              outg[:,rows[:,None],cols[None,:]] = gate * out
+              pair_ij = self.norm(pair[:,rows[:,None],cols[None,:]])
+              gate = torch.sigmoid(self.gate(pair_ij)) # (B, L, L, d_pair)
+              out[:,rows[:,None],cols[None,:]] = gate * out_ij
 
-        return outg
+        return out

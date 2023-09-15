@@ -211,6 +211,10 @@ class Predictor():
                 msa_i = msa_i[idxs_tokeep]
                 ins_i = ins_i[idxs_tokeep]
 
+            LL = 2000
+            msa_i = msa_i[:,:LL]
+            ins_i = ins_i[:,:LL]
+            Ls_i = [LL]
 
             msas.append(msa_i)
             inss.append(ins_i)

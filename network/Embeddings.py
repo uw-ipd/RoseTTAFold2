@@ -5,7 +5,7 @@ from torch import einsum
 import torch.utils.checkpoint as checkpoint
 from util import get_Cb
 from util_module import Dropout, create_custom_forward, rbf, init_lecun_normal
-from Attention_module import Attention, FeedForwardLayer, AttentionWithBias
+from Attention_module import Attention, FeedForwardLayer
 from Track_module import PairStr2Pair
 
 # Module contains classes and functions to generate initial embeddings
@@ -149,37 +149,6 @@ class TemplatePairStack(nn.Module):
         return self.norm(templ).reshape(B, T, L, L, -1)
 
 
-class TemplateTorsionStack(nn.Module):
-    def __init__(self, n_block=2, d_templ=64, d_rbf=64, n_head=4, d_hidden=16, p_drop=0.15):
-        super(TemplateTorsionStack, self).__init__()
-        self.n_block=n_block
-        self.proj_pair = nn.Linear(d_templ+d_rbf, d_templ)
-        proc_s = [AttentionWithBias(d_in=d_templ, d_bias=d_templ,
-                                    n_head=n_head, d_hidden=d_hidden) for i in range(n_block)]
-        self.row_attn = nn.ModuleList(proc_s)
-        proc_s = [FeedForwardLayer(d_templ, 4, p_drop=p_drop) for i in range(n_block)]
-        self.ff = nn.ModuleList(proc_s)
-        self.norm = nn.LayerNorm(d_templ)
-
-    def reset_parameter(self):
-        self.proj_pair = init_lecun_normal(self.proj_pair)
-        nn.init.zeros_(self.proj_pair.bias)
-
-    def forward(self, tors, pair, rbf_feat, use_checkpoint=False):
-        B, T, L = tors.shape[:3]
-        tors = tors.reshape(B*T, L, -1)
-        pair = pair.reshape(B*T, L, L, -1)
-        pair = torch.cat((pair, rbf_feat), dim=-1)
-        pair = self.proj_pair(pair)
-        
-        for i_block in range(self.n_block):
-            if use_checkpoint:
-                tors = tors + checkpoint.checkpoint(create_custom_forward(self.row_attn[i_block]), tors, pair)
-            else:
-                tors = tors + self.row_attn[i_block](tors, pair)
-            tors = tors + self.ff[i_block](tors)
-        return self.norm(tors).reshape(B, T, L, -1)
-
 class Templ_emb(nn.Module):
     # Get template embedding
     # Features are
@@ -283,11 +252,12 @@ class Templ_emb(nn.Module):
 class Recycling(nn.Module):
     def __init__(self, d_msa=256, d_pair=128, d_state=32, d_rbf=64):
         super(Recycling, self).__init__()
-        #self.emb_rbf = nn.Linear(d_rbf, d_pair)
         self.proj_dist = nn.Linear(d_rbf+d_state*2, d_pair)
         self.norm_pair = nn.LayerNorm(d_pair)
         self.norm_msa = nn.LayerNorm(d_msa)
         self.norm_state = nn.LayerNorm(d_state)
+
+        self.d_out = d_pair
         
         self.reset_parameter()
     
@@ -297,11 +267,12 @@ class Recycling(nn.Module):
         self.proj_dist = init_lecun_normal(self.proj_dist)
         nn.init.zeros_(self.proj_dist.bias)
 
-    def forward(self, seq, msa, pair, state, xyz, mask_recycle=None):
+    def forward(self, seq, msa, pair, state, xyz, mask_recycle=None, stride=256):
         B, L = msa.shape[:2]
-        state = self.norm_state(state)
-        msa = self.norm_msa(msa)
-        pair = self.norm_pair(pair)
+        dtype = msa.dtype
+        state = self.norm_state(state).to(dtype=dtype)
+        msa = self.norm_msa(msa).to(dtype=dtype)
+        pair = self.norm_pair(pair).to(dtype=dtype)
 
         ## SYMM
         left = state.unsqueeze(2).expand(-1,-1,L,-1)
@@ -312,15 +283,21 @@ class Recycling(nn.Module):
 
         dist_CB = rbf(
             torch.cdist(Cb, Cb)
-        ).reshape(B,L,L,-1)
+        ).reshape(B,L,L,-1).to(dtype=dtype)
 
         if mask_recycle != None:
-            dist_CB = mask_recycle[...,None].float()*dist_CB
+            dist_CB = mask_recycle[...,None].to(dtype=dtype)*dist_CB
 
         dist_CB = torch.cat((dist_CB, left, right), dim=-1)
-        dist = self.proj_dist(dist_CB)
 
-        pair = pair + dist 
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
+
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            pair[:,rows] += self.proj_dist(dist_CB[:,rows])
 
         return msa, pair, state
 

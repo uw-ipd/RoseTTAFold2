@@ -43,7 +43,9 @@ def get_args():
     parser.add_argument("-model", default=default_model, help="Model weights. [weights/RF2_apr23.pt]")
     parser.add_argument("-n_recycles", default=3, type=int, help="Number of recycles to use [3].")
     parser.add_argument("-n_models", default=1, type=int, help="Number of models to predict [1].")
-    parser.add_argument("-subcrop", default=-1, type=int, help="Subcrop pair-to-pair updates. For very large models (>3000 residues) a subcrop of 800-1600 can improve structure accuracy and reduce runtime. A value of -1 means no subcropping. [-1]")
+    parser.add_argument("-subcrop", default=-1, type=int, help="Subcrop pair-to-pair updates. A value of -1 means no subcropping. [-1]")
+    parser.add_argument("-topk", default=2048, type=int, help="Limit number of residue-pair neighbors in structure updates. A value of -1 means no subcropping. [2048]")
+    parser.add_argument("-low_vram", default=False, help="Offload some computations to CPU to allow larger systems in low VRAM. [False]", action='store_true')
     parser.add_argument("-nseqs", default=256, type=int, help="The number of MSA sequences to sample in the main 1D track [256].")
     parser.add_argument("-nseqs_full", default=2048, type=int, help="The number of MSA sequences to sample in the wide-MSA 1D track [2048].")
     args = parser.parse_args()
@@ -186,12 +188,12 @@ class Predictor():
         if not os.path.exists(model_weights):
             return False
         checkpoint = torch.load(model_weights, map_location=self.device)
-        self.model.load_state_dict(checkpoint['model_state_dict'])
+        self.model.load_state_dict(checkpoint['model_state_dict'],strict=False)
         return True
 
     def predict(
         self, inputs, out_prefix, symm="C1", ffdb=None,
-        n_recycles=4, n_models=1, subcrop=-1, nseqs=256, nseqs_full=2048,
+        n_recycles=4, n_models=1, subcrop=-1, topk=-1, low_vram=False, nseqs=256, nseqs_full=2048,
         n_templ=4, msa_mask=0.0, is_training=False, msa_concat_mode="diag"
     ):
         self.xyz_converter = self.xyz_converter.cpu()
@@ -211,10 +213,10 @@ class Predictor():
                 msa_i = msa_i[idxs_tokeep]
                 ins_i = ins_i[idxs_tokeep]
 
-            LL = 2000
-            msa_i = msa_i[:,:LL]
-            ins_i = ins_i[:,:LL]
-            Ls_i = [LL]
+            #LL = 3000
+            #msa_i = msa_i[:,:LL]
+            #ins_i = ins_i[:,:LL]
+            #Ls_i = [LL]
 
             msas.append(msa_i)
             inss.append(ins_i)
@@ -327,7 +329,7 @@ class Predictor():
                 t1d, t2d, xyz_t[:,:,:,1], alpha_t, mask_t_2d, 
                 xyz_prev, mask_prev, same_chain, idx_pdb,
                 symmids, symmsub, symmRs, symmmeta,  Ls, 
-                n_recycles, nseqs, nseqs_full, subcrop,
+                n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram,
                 "%s_%02d"%(out_prefix, i_trial),
                 msa_mask=msa_mask
             )
@@ -341,7 +343,7 @@ class Predictor():
         t1d, t2d, xyz_t, alpha_t, mask_t, 
         xyz_prev, mask_prev, same_chain, idx_pdb, 
         symmids, symmsub, symmRs, symmmeta, L_s, 
-        n_recycles, nseqs, nseqs_full, subcrop, out_prefix,
+        n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram, out_prefix,
         msa_mask=0.0,
     ):
         self.xyz_converter = self.xyz_converter.to(self.device)
@@ -413,6 +415,8 @@ class Predictor():
                                                                pair_prev=pair_prev,
                                                                state_prev=state_prev,
                                                                p2p_crop=subcrop,
+                                                               topk_crop=topk,
+                                                               low_vram=low_vram,
                                                                mask_recycle=mask_recycle,
                                                                symmids=symmids,
                                                                symmsub=symmsub,
@@ -510,6 +514,8 @@ if __name__ == "__main__":
         n_recycles=args.n_recycles, 
         n_models=args.n_models, 
         subcrop=args.subcrop, 
+        low_vram=args.low_vram, 
+        topk=args.topk, 
         nseqs=args.nseqs, 
         nseqs_full=args.nseqs_full, 
         ffdb=ffdb)

@@ -50,7 +50,7 @@ class RoseTTAFoldModule(nn.Module):
                 t1d=None, t2d=None, xyz_t=None, alpha_t=None, mask_t=None, same_chain=None,
                 msa_prev=None, pair_prev=None, state_prev=None, mask_recycle=None,
                 return_raw=False, return_full=False,
-                use_checkpoint=False, p2p_crop=-1, topk_crop=-1,
+                use_checkpoint=False, p2p_crop=-1, topk_crop=-1, low_vram=False,
                 symmids=None, symmsub=None, symmRs=None, symmmeta=None):
         if symmids is None:
             symmids = torch.tensor([[0]], device=xyz.device) # C1
@@ -78,10 +78,16 @@ class RoseTTAFoldModule(nn.Module):
         pair = pair + pair_recycle
         state = state + state_recycle
 
+        # free unused
+        msa_prev, pair_prev, state_prev = None, None, None
+        msa_recycle, pair_recycle, state_recycle = None, None, None
+
         #
         # add template embedding
         pair, state = self.templ_emb(t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, symmids=symmids)
 
+        # free unused
+        t1d, t2d, alpha_t, xyz_t, mask_t = None, None, None, None, None
 
         # Predict coordinates from given inputs
         msa, pair, R, T, alpha, state, symmsub = self.simulator(

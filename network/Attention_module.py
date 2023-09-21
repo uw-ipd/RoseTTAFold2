@@ -31,6 +31,8 @@ class FeedForwardLayer(nn.Module):
         # a bit hacky.  L is always the -2 dimension so stripe there
         L = src.shape[-2]
         dtype = src.dtype
+        dev_m = self.linear1.weight.device
+        dev_t = src.device
 
         # fd reduce memory in inference
         STRIDE = L
@@ -39,9 +41,10 @@ class FeedForwardLayer(nn.Module):
 
         out = torch.zeros_like(src)
         for i in range((L-1)//STRIDE+1):
-          cols = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-          out_i = self.norm(src[...,cols,:])
-          out[...,cols,:] = self.linear2(self.dropout(F.relu(self.linear1(out_i)))).to(dtype=dtype)
+          cols = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=src.device)
+          out_i = self.norm(src[...,cols,:].to(dev_m))
+          out_i = self.linear2(self.dropout(F.relu(self.linear1(out_i))))
+          out[...,cols,:] = out_i.to(dev_t, dtype=dtype)
         return out
 
 class Attention(nn.Module):
@@ -77,20 +80,23 @@ class Attention(nn.Module):
         B, K = key.shape[:2]
         #
 
+        dev_m = self.to_q.weight.device
+        dev_t = query.device
+
         ## fd this is only ever called w/ high B and low Q/K
         ## apply stride along B
         STRIDE = B
         if (not self.training and stride>0 and stride<B):
             STRIDE = stride
 
-        out = torch.zeros((B,Q,self.d_out), device=query.device, dtype=query.dtype)
+        out = torch.zeros((B,Q,self.d_out), device=dev_t, dtype=query.dtype)
         for i in range((B-1)//STRIDE+1):
-            batches = torch.arange(i*STRIDE, min((i+1)*STRIDE, B))
+            batches = torch.arange(i*STRIDE, min((i+1)*STRIDE, B), device=query.device)
 
-            query_i = self.to_q(query[batches]).reshape(-1, Q, self.h, self.dim)
-            key_i = self.to_k(key[batches]).reshape(-1, K, self.h, self.dim)
-            value_i = self.to_v(value[batches]).reshape(-1, K, self.h, self.dim)
-        
+            query_i = self.to_q(query[batches].to(dev_m)).reshape(-1, Q, self.h, self.dim)
+            key_i = self.to_k(key[batches].to(dev_m)).reshape(-1, K, self.h, self.dim)
+            value_i = self.to_v(value[batches].to(dev_m)).reshape(-1, K, self.h, self.dim)
+
             query_i = query_i * self.scaling
             attn = einsum('bqhd,bkhd->bhqk', query_i, key_i)
             attn = F.softmax(attn, dim=-1)
@@ -98,7 +104,7 @@ class Attention(nn.Module):
             out_i = einsum('bhqk,bkhd->bqhd', attn, value_i)
             out_i = out_i.reshape(-1, Q, self.h*self.dim)
         
-            out[batches] = self.to_out(out_i).to(dtype=query.dtype)
+            out[batches] = self.to_out(out_i).to(dev_t, query.dtype)
 
         return out
 
@@ -121,23 +127,28 @@ class SequenceWeight(nn.Module):
         nn.init.xavier_uniform_(self.to_query.weight)
         nn.init.xavier_uniform_(self.to_key.weight)
 
-    def forward(self, msa, MSANorm, stride):
+    def forward(self, msa, MSANorm, low_vram, stride):
         B, N, L = msa.shape[:3]
+
+        dev_m = self.to_query.weight.device
+        dev_t = msa.device
 
         STRIDE = N
         if (not self.training and stride>0):
             STRIDE = stride
 
-        tar_seq = MSANorm(msa[:,0])
+        tar_seq = MSANorm(msa[:,0].to(dev_m))
         q = self.to_query(tar_seq).view(B, 1, L, self.h, self.dim)
         q = q * self.scale
         attn = torch.zeros((B,N,L,self.h,1), device=msa.device, dtype=msa.dtype)
         for i in range((N-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, N))
-            msa_i = MSANorm(msa[:,rows])
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, N), device=msa.device)
+            msa_i = MSANorm(msa[:,rows].to(dev_m))
             k_i = self.to_key(msa_i).view(B, -1, L, self.h, self.dim)
-            attn[:,rows] = einsum('bqihd,bkihd->bkihq', q, k_i)
-        attn = F.softmax(attn, dim=1)
+            attn[:,rows] = einsum('bqihd,bkihd->bkihq', q, k_i).to(dev_t)
+
+        attn = F.softmax(attn.to(dev_m), dim=1).to(dev_t)
+
         return self.dropout(attn)
 
 class MSARowAttentionWithBias(nn.Module):
@@ -178,8 +189,11 @@ class MSARowAttentionWithBias(nn.Module):
         nn.init.zeros_(self.to_out.weight)
         nn.init.zeros_(self.to_out.bias)
 
-    def forward(self, msa, pair, stride_n=64, stride_l=256):
+    def forward(self, msa, pair, low_vram=False, stride_n=64, stride_l=256):
         B, N, L = msa.shape[:3]
+
+        dev_m = self.to_q.weight.device
+        dev_t = msa.device
 
         # fd reduce memory in inference
         STRIDE_N, STRIDE_L = N, L
@@ -188,44 +202,44 @@ class MSARowAttentionWithBias(nn.Module):
         if (not self.training and stride_l>0):
             STRIDE_L = stride_l
 
-        #seq_weight = self.seq_weight(self.norm_msa(msa))
-        seq_weight = self.seq_weight(msa, self.norm_msa, stride_n)
+        seq_weight = self.seq_weight(msa, self.norm_msa, low_vram, stride_n)
 
         attn = torch.zeros((B,L,L,self.h), device=pair.device, dtype=pair.dtype)
         for i in range((N-1)//STRIDE_N+1):
-            rows = torch.arange(i*STRIDE_N, min((i+1)*STRIDE_N, N))
+            rows = torch.arange(i*STRIDE_N, min((i+1)*STRIDE_N, N), device=pair.device)
 
-            msa_i = self.norm_msa(msa[:,rows])
-            seq_weight_i = seq_weight[:,rows]
+            msa_i = self.norm_msa(msa[:,rows].to(dev_m))
+            seq_weight_i = seq_weight[:,rows].to(dev_m)
             query_i = self.to_q(msa_i).reshape(B, -1, L, self.h, self.dim)
             key_i = self.to_k(msa_i).reshape(B, -1, L, self.h, self.dim)
 
             key_i *= self.scaling
             query_i *= seq_weight_i.expand(-1, -1, -1, -1, self.dim)
 
-            attn += einsum('bnihk,bnjhk->bijh', query_i, key_i) # << peak memory
+            attn_i = einsum('bnihk,bnjhk->bijh', query_i, key_i).to(dev_t)
+            attn += attn_i
 
         for i in range((L-1)//STRIDE_L+1):
-            rows = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L))
-            pair_i = self.norm_pair(pair[:,rows])
-            attn[:,rows] += self.to_b(pair_i) # (B, STRIDE, L, h)
+            rows = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L), device=pair.device)
+            pair_i = self.norm_pair(pair[:,rows].to(dev_m))
+            attn[:,rows] += self.to_b(pair_i).to(dev_t) # (B, STRIDE, L, h)
 
-        attn = F.softmax(attn, dim=-2) # (B, L, L, h)
+        attn = F.softmax(attn.to(dev_m), dim=-2).to(dev_t) # (B, L, L, h)
 
         out = torch.zeros((B,N,L,self.h*self.dim), device=pair.device, dtype=pair.dtype)
         for i in range((L-1)//STRIDE_L+1):
-            slices = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L)) # rows in value, cols in out
-            msa_i = self.norm_msa(msa[:,:,slices])
+            slices = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L), device=pair.device) # rows in value, cols in out
+            msa_i = self.norm_msa(msa[:,:,slices].to(dev_m))
             value_i = self.to_v(msa_i).reshape(B, N, -1, self.h, self.dim)
-            out += einsum('bijh,bnjhd->bnihd', attn[:,:,slices], value_i).reshape(B, N, L, -1)
+            out += einsum('bijh,bnjhd->bnihd', attn[:,:,slices].to(dev_m), value_i).reshape(B, N, L, -1).to(dev_t)
 
         outg = torch.zeros((B,N,L,self.dim_out), device=pair.device, dtype=pair.dtype)
         for i in range((L-1)//STRIDE_L+1):
-            slices = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L)) # rows in value, cols in out
-            msa_i = self.norm_msa(msa[:,:,slices])
+            slices = torch.arange(i*STRIDE_L, min((i+1)*STRIDE_L, L), device=pair.device) # rows in value, cols in out
+            msa_i = self.norm_msa(msa[:,:,slices].to(dev_m))
             gate_i = torch.sigmoid(self.to_g(msa_i)) # (B, N, L, h*dim)
-            out[:,:,slices] *= gate_i
-            outg[:,:,slices] = self.to_out( out[:,:,slices] ).to(dtype=pair.dtype)
+            out_i = out[:,:,slices].to(dev_m) * gate_i
+            outg[:,:,slices] = self.to_out( out_i ).to(dtype=pair.dtype).to(dev_t)
 
         return outg
 
@@ -266,6 +280,9 @@ class MSAColAttention(nn.Module):
         B, N, L = msa.shape[:3]
         dtype = msa.dtype
 
+        dev_m = self.to_q.weight.device
+        dev_t = msa.device
+
         # fd reduce memory in inference
         STRIDE = L
         if (not self.training and stride>0):
@@ -273,9 +290,9 @@ class MSAColAttention(nn.Module):
 
         out = torch.zeros((B,N,L,self.dim_out), device=msa.device, dtype=msa.dtype)
         for i in range((L-1)//STRIDE+1):
-            cols = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            cols = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=msa.device)
 
-            msa_i = self.norm_msa(msa[:,:,cols]).to(dtype=dtype)
+            msa_i = self.norm_msa(msa[:,:,cols].to(dev_m)).to(dtype=dtype)
             query_i = self.to_q(msa_i).reshape(B, N, -1, self.h, self.dim)
             key_i = self.to_k(msa_i).reshape(B, N, -1, self.h, self.dim)
             value_i = self.to_v(msa_i).reshape(B, N, -1, self.h, self.dim)
@@ -287,8 +304,9 @@ class MSAColAttention(nn.Module):
 
             out_i = einsum('bihqk,bkihd->bqihd', attn_i, value_i).reshape(B, N, -1, self.dim_out)
             out_i = gate_i * out_i
+            out_i = self.to_out(out_i).to(dev_t, dtype=msa.dtype)
             #
-            out[:,:,cols] = self.to_out(out_i).to(dtype=msa.dtype)
+            out[:,:,cols] = out_i
 
         return out
 
@@ -325,9 +343,13 @@ class MSAColGlobalAttention(nn.Module):
 
     def forward(self, msa):
         B, N, L = msa.shape[:3]
+
+        dev_m = self.to_q.weight.device
+        dev_t = msa.device
+
         #
         dtype = msa.dtype
-        msa = self.norm_msa(msa).to(dtype=dtype)
+        msa = self.norm_msa(msa.to(dev_m)).to(dtype=dtype)
         #
         query = self.to_q(msa).reshape(B, N, L, self.h, self.dim)
         query = query.mean(dim=1) # (B, L, h, dim)
@@ -342,7 +364,7 @@ class MSAColGlobalAttention(nn.Module):
         out = einsum('bihk,bkid->bihd', attn, value).reshape(B, 1, L, -1) # (B, 1, L, h*dim)
         out = gate * out # (B, N, L, h*dim)
         #
-        out = self.to_out(out)
+        out = self.to_out(out).to(dev_t)
         return out
 
 # Instead of triangle attention, use Tied axail attention with bias from coordinates..?
@@ -389,6 +411,9 @@ class BiasedAxialAttention(nn.Module):
     def forward(self, pair, bias, stride=256):
         B, L = pair.shape[:2] # after subunit mask is applied
 
+        dev_m = self.to_q.weight.device
+        dev_t = pair.device
+
         # pair: (B, L, L, d_pair)
         if self.is_row:
             pair = pair.permute(0,2,1,3)
@@ -401,37 +426,36 @@ class BiasedAxialAttention(nn.Module):
 
         attn = torch.zeros((B,L,L,self.h), device=pair.device, dtype=pair.dtype)
         for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
 
-            pair_i = self.norm_pair(pair[:,rows])
+            pair_i = self.norm_pair(pair[:,rows].to(dev_m))
             query = self.to_q(pair_i).reshape(B, -1, L, self.h, self.dim)
             query *= self.scaling
             key = self.to_k(pair_i).reshape(B, -1, L, self.h, self.dim)
             key = key / L # normalize for tied attention
-
-            attn += einsum('bnihk,bnjhk->bijh', query, key) # tied attention
+            attn_i = einsum('bnihk,bnjhk->bijh', query, key).to(dev_t)
+            attn +=  attn_i 
 
         for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            bias_i = self.norm_bias(bias[:,rows]).to(dtype=bias.dtype)
-            attn[:,rows] += self.to_b(bias_i) # (B, STRIDE, L, h)
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
+            bias_i = self.norm_bias(bias[:,rows].to(dev_m)).to(dtype=bias.dtype)
+            attn[:,rows] += self.to_b(bias_i).to(dev_t) # (B, STRIDE, L, h)
 
-        attn = F.softmax(attn, dim=-2) # (B, L, L, h)
+        attn = F.softmax(attn.to(dev_m), dim=-2).to(dev_t) # (B, L, L, h)
 
-        #out = torch.zeros((B,L,L,self.h*self.dim), device=pair.device, dtype=pair.dtype)
         out = torch.zeros((B,L,L,self.dim_out), device=pair.device, dtype=pair.dtype)
         for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
 
-            pair_i = self.norm_pair(pair[:,rows])
+            pair_i = self.norm_pair(pair[:,rows].to(dev_m))
             value_i = self.to_v(pair_i).reshape(B, -1, L, self.h, self.dim)
 
             for j in range((L-1)//STRIDE+1):
-                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L))
+                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=pair.device)
                 NC,NR = cols.shape[0], rows.shape[0]
-                out_ij = einsum('bijh,bnjhd->bnihd', attn[:,cols], value_i).reshape(B, NR, NC, -1)
-                gate_ij = torch.sigmoid(self.to_g(pair_i[:,:,cols]))
-                out[:,rows[:,None],cols[None,:]] = self.to_out( gate_ij*out_ij )
+                out_ij = einsum('bijh,bnjhd->bnihd', attn[:,cols].to(dev_m), value_i).reshape(B, NR, NC, -1)
+                gate_ij = torch.sigmoid(self.to_g(pair_i[:,:,cols].to(dev_m)))
+                out[:,rows[:,None],cols[None,:]] = self.to_out( gate_ij*out_ij ).to(dev_t)
 
         if self.is_row:
             out = out.permute(0,2,1,3)
@@ -484,36 +508,45 @@ class TriangleMultiplication(nn.Module):
     def forward(self, pair, stride=256):
         B,L = pair.shape[:2]
 
+        dev_m = self.left_proj.weight.device
+        dev_t = pair.device
+
         # fd reduce memory in inference
         STRIDE = L
         if (not self.training and stride>0):
             STRIDE = stride
 
+        pairnorm = torch.zeros_like(pair)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
+            pairnorm[:,rows] = self.norm(pair[:,rows].to(dev_m)).to(dev_t, dtype=pair.dtype)
+        pair = pairnorm
+
         out = torch.zeros((B,L,L,self.d_out), device=pair.device, dtype=pair.dtype)
         for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
             for j in range((L-1)//STRIDE+1):
-              cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L))
+              cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=pair.device)
 
               if self.outgoing:
-                  pair_i = self.norm(pair[:,rows,:])
+                  pair_i = pair[:,rows,:].to(dev_m)
                   left = self.left_proj(pair_i) # (B, L, L, d_h)
                   left_gate = torch.sigmoid(self.left_gate(pair_i))
                   left = left_gate * left
     
-                  pair_i = self.norm(pair[:,cols,:])
+                  pair_i = pair[:,cols,:].to(dev_m)
                   right = self.right_proj(pair_i) # (B, L, L, d_h)
                   right_gate = torch.sigmoid(self.right_gate(pair_i))
                   right = right_gate * right
     
                   out_ij = einsum('bikd,bjkd->bijd', left, right/float(L))
               else:
-                  pair_i = self.norm(pair[:,:,rows])
+                  pair_i = pair[:,:,rows].to(dev_m)
                   left = self.left_proj(pair_i) # (B, L, L, d_h)
                   left_gate = torch.sigmoid(self.left_gate(pair_i))
                   left = left_gate * left
     
-                  pair_i = self.norm(pair[:,:,cols])
+                  pair_i = pair[:,:,cols].to(dev_m)
                   right = self.right_proj(pair_i) # (B, L, L, d_h)
                   right_gate = torch.sigmoid(self.right_gate(pair_i))
                   right = right_gate * right
@@ -523,8 +556,8 @@ class TriangleMultiplication(nn.Module):
               out_ij = self.norm_out(out_ij)
               out_ij = self.out_proj(out_ij)
 
-              pair_ij = self.norm(pair[:,rows[:,None],cols[None,:]])
+              pair_ij = pair[:,rows[:,None],cols[None,:]].to(dev_m)
               gate = torch.sigmoid(self.gate(pair_ij)) # (B, L, L, d_pair)
-              out[:,rows[:,None],cols[None,:]] = gate * out_ij
+              out[:,rows[:,None],cols[None,:]] = (gate * out_ij).to(dev_t)
 
         return out

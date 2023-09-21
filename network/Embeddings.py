@@ -8,6 +8,9 @@ from util_module import Dropout, create_custom_forward, rbf, init_lecun_normal
 from Attention_module import Attention, FeedForwardLayer
 from Track_module import PairStr2Pair
 
+#from pytorch_memlab import LineProfiler, profile
+
+
 # Module contains classes and functions to generate initial embeddings
 class PositionalEncoding2D(nn.Module):
     # Add relative positional encoding to pair features
@@ -17,21 +20,34 @@ class PositionalEncoding2D(nn.Module):
         self.maxpos = maxpos
         self.nbin = abs(minpos)+maxpos+1
         self.emb = nn.Embedding(self.nbin, d_model)
-        #self.emb_chain = nn.Embedding(2, d_model)
+        self.d_out = d_model
     
-    def forward(self, idx):
+    def forward(self, idx, dev=None, stride=1024):
         B, L = idx.shape[:2]
 
-        bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
+        if dev is None:
+          dev = idx.device
+        dev_m = idx.device
 
-        seqsep = torch.full((B,L,L),100, device=idx.device)
+        bins = torch.arange(self.minpos, self.maxpos, device=dev_m)
+
+        seqsep = torch.full((B,L,L),100, device=dev)
         seqsep[0] = idx[0,None,:] - idx[0,:,None] # (B, L, L)
 
-        #
-        ib = torch.bucketize(seqsep, bins).long() # (B, L, L)
-        emb = self.emb(ib) #(B, L, L, d_model)
-        #emb_c = self.emb_chain(same_chain.long())
-        return emb #+ emb_c
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
+
+        emb = torch.zeros((B,L,L,self.d_out), device=dev)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=dev)[:,None]
+            for j in range((L-1)//STRIDE+1):
+                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=dev)[None,:]
+                ib = torch.bucketize(seqsep[:,rows,cols].to(dev_m), bins).long()
+                emb[:,rows,cols] = self.emb(ib).to(dev)
+
+        return emb
 
 class MSA_emb(nn.Module):
     # Get initial seed MSA embedding
@@ -68,18 +84,22 @@ class MSA_emb(nn.Module):
         #   - msa: Initial MSA embedding (B, N, L, d_msa)
         #   - pair: Initial Pair embedding (B, L, L, d_pair)
 
-        B, N, L = msa.shape[:3] # number of sequenes in MSA
+        B, N, L = msa.shape[:3]
+
+        dev_m = self.emb.weight.device
+        dev_t = msa.device
 
         # msa embedding 
-        msa = self.emb(msa) # (B, N, L, d_model) # MSA embedding
+        seq = seq.to(dev_m)
+        msa = self.emb(msa.to(dev_m)) # (B, N, L, d_model) # MSA embedding
         tmp = self.emb_q(seq).unsqueeze(1) # (B, 1, L, d_model) -- query embedding
-        msa = msa + tmp.expand(-1, N, -1, -1) # adding query embedding to MSA
+        msa = (msa + tmp.expand(-1, N, -1, -1)).to(dev_t) # adding query embedding to MSA
 
         # pair embedding 
         left = self.emb_left(seq)[:,None] # (B, 1, L, d_pair)
         right = self.emb_right(seq)[:,:,None] # (B, L, 1, d_pair)
-        pair = (left + right) # (B, L, L, d_pair)
-        pair = pair + self.pos(idx) # add relative position
+        pair = (left.to(dev_t) + right.to(dev_t)) # (B, L, L, d_pair)
+        pair += self.pos(idx.to(dev_m), dev_t) # add relative position
 
         # state embedding
         state = self.emb_state(seq) #.repeat(oligo,1,1)
@@ -130,23 +150,40 @@ class TemplatePairStack(nn.Module):
         self.block = nn.ModuleList(proc_s)
         self.norm = nn.LayerNorm(d_templ)
         self.reset_parameter()
+
+        self.d_out = d_templ
     
     def reset_parameter(self):
         self.proj_t1d = init_lecun_normal(self.proj_t1d)
         nn.init.zeros_(self.proj_t1d.bias)
 
-    def forward(self, templ, rbf_feat, t1d, use_checkpoint=False, p2p_crop=-1, symmids=None):
+    def forward(self, templ, rbf_feat, t1d, use_checkpoint=False, p2p_crop=-1, symmids=None, stride=256):
         B, T, L = templ.shape[:3]
+
+        dev_t = templ.device
+        dev_m = self.proj_t1d.weight.device
+
         templ = templ.reshape(B*T, L, L, -1)
         t1d = t1d.reshape(B*T, L, -1)
-        state = self.proj_t1d(t1d)
+        state = self.proj_t1d(t1d.to(dev_m)).to(dev_t)
 
         for i_block in range(self.n_block):
             if use_checkpoint:
-                templ = checkpoint.checkpoint(create_custom_forward(self.block[i_block]), templ, rbf_feat, state, p2p_crop) #, symmids)
+                templ = checkpoint.checkpoint(create_custom_forward(self.block[i_block]), templ, rbf_feat, state.to(dev_m), p2p_crop) #, symmids)
             else:
-                templ = self.block[i_block](templ, rbf_feat, state, p2p_crop) #, symmids)
-        return self.norm(templ).reshape(B, T, L, L, -1)
+                templ = self.block[i_block](templ, rbf_feat, state.to(dev_m), p2p_crop) #, symmids)
+
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
+
+        out = torch.zeros((B*T,L,L,self.d_out), device=dev_t, dtype=t1d.dtype)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            out[:,:,rows] = self.norm(templ[:,:,rows].to(dev_m)).to(dev_t,t1d.dtype)
+
+        return out.reshape(B, T, L, L, -1)
 
 
 class Templ_emb(nn.Module):
@@ -174,6 +211,10 @@ class Templ_emb(nn.Module):
         self.proj_t1d = nn.Linear(d_t1d+d_tor, d_templ)
         self.attn_tor = Attention(d_state, d_templ, n_head, d_hidden, d_state, p_drop=p_drop)
 
+        #fd
+        self.d_rbf = 64
+        self.d_templ = d_templ
+
         self.reset_parameter()
     
     def reset_parameter(self):
@@ -183,25 +224,60 @@ class Templ_emb(nn.Module):
         nn.init.kaiming_normal_(self.proj_t1d.weight, nonlinearity='relu')
         nn.init.zeros_(self.proj_t1d.bias)
     
-    def _get_templ_emb(self, t1d, t2d):
+    def _get_templ_emb(self, t1d, t2d, stride=256):
         B, T, L, _ = t1d.shape
+
+        dev_m = self.emb.weight.device
+        dev_t = t1d.device
+
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
+
         # Prepare 2D template features
         left = t1d.unsqueeze(3).expand(-1,-1,-1,L,-1)
         right = t1d.unsqueeze(2).expand(-1,-1,L,-1,-1)
         #
         templ = torch.cat((t2d, left, right), -1) # (B, T, L, L, 88)
-        return self.emb(templ) # Template templures (B, T, L, L, d_templ)
-        
-    def _get_templ_rbf(self, xyz_t, mask_t):
+        out = torch.zeros((B,T,L,L,self.d_templ), device=dev_t, dtype=t1d.dtype)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            out[:,:,rows] = self.emb(templ[:,:,rows].to(dev_m)).to(dev_t)
+
+        return out # Template templures (B, T, L, L, d_templ)
+
+    def _get_templ_rbf(self, xyz_t, mask_t, dev_t = None, stride=256):
         B, T, L = xyz_t.shape[:3]
+
+        if dev_t is None:
+          dev_t = xyz_t.device
+
+        # fd reduce memory in inference
+        STRIDE = L
+        if (not self.training and stride>0):
+            STRIDE = stride
 
         # process each template features
         xyz_t = xyz_t.reshape(B*T, L, 3)
         mask_t = mask_t.reshape(B*T, L, L)
-        rbf_feat = rbf(torch.cdist(xyz_t, xyz_t)).to(xyz_t.dtype) * mask_t[...,None] # (B*T, L, L, d_rbf)
+
+        rbf_feat = torch.zeros((B*T,L,L,self.d_rbf), device=dev_t, dtype=xyz_t.dtype)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+
+            rbf_i = rbf( torch.cdist(xyz_t[:,rows], xyz_t) )
+            #print (rbf_i.shape, mask_t[:,rows].shape)
+            rbf_i *= mask_t[:,rows].unsqueeze(-1)
+
+            rbf_feat[:,rows] = rbf_i.to(dev_t,xyz_t.dtype)
+
         return rbf_feat
     
-    def forward(self, t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, use_checkpoint=False, p2p_crop=-1, symmids=None):
+    def forward(
+      self, t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, 
+      use_checkpoint=False, p2p_crop=-1, symmids=None, stride=256
+    ):
         # Input
         #   - t1d: 1D template info (B, T, L, 22)
         #   - t2d: 2D template info (B, T, L, L, 44)
@@ -211,9 +287,12 @@ class Templ_emb(nn.Module):
         #   - pair: query pair features (B, L, L, d_pair)
         #   - state: query state features (B, L, d_state)
         B, T, L, _ = t1d.shape
-        
+
+        dev_m = self.emb.weight.device
+        dev_t = pair.device
+
         templ = self._get_templ_emb(t1d, t2d)
-        rbf_feat = self._get_templ_rbf(xyz_t, mask_t)
+        rbf_feat = self._get_templ_rbf(xyz_t, mask_t, dev_t)
         
         # process each template pair feature
         templ = self.templ_stack(
@@ -221,7 +300,7 @@ class Templ_emb(nn.Module):
         ).to(pair.dtype) # (B, T, L,L, d_templ)
 
         # Prepare 1D template torsion angle features
-        t1d = torch.cat((t1d, alpha_t), dim=-1) # (B, T, L, 22+30)
+        t1d = torch.cat((t1d.to(dev_m), alpha_t), dim=-1) # (B, T, L, 22+30)
         t1d = self.proj_t1d(t1d)
         
         # mixing query state features to template state features
@@ -257,47 +336,63 @@ class Recycling(nn.Module):
         self.norm_msa = nn.LayerNorm(d_msa)
         self.norm_state = nn.LayerNorm(d_state)
 
-        self.d_out = d_pair
+        self.d_pair = d_pair
+        self.d_msa = d_msa
+        self.d_rbf = d_rbf
         
         self.reset_parameter()
-    
+
     def reset_parameter(self):
         #self.emb_rbf = init_lecun_normal(self.emb_rbf)
         #nn.init.zeros_(self.emb_rbf.bias)
         self.proj_dist = init_lecun_normal(self.proj_dist)
         nn.init.zeros_(self.proj_dist.bias)
 
+    #@profile
     def forward(self, seq, msa, pair, state, xyz, mask_recycle=None, stride=256):
         B, L = msa.shape[:2]
         dtype = msa.dtype
-        state = self.norm_state(state).to(dtype=dtype)
-        msa = self.norm_msa(msa).to(dtype=dtype)
-        pair = self.norm_pair(pair).to(dtype=dtype)
 
-        ## SYMM
-        left = state.unsqueeze(2).expand(-1,-1,L,-1)
-        right = state.unsqueeze(1).expand(-1,L,-1,-1)
-
-        # recreate Cb given N,Ca,C
-        Cb = get_Cb(xyz[:,:,:3])
-
-        dist_CB = rbf(
-            torch.cdist(Cb, Cb)
-        ).reshape(B,L,L,-1).to(dtype=dtype)
-
-        if mask_recycle != None:
-            dist_CB = mask_recycle[...,None].to(dtype=dtype)*dist_CB
-
-        dist_CB = torch.cat((dist_CB, left, right), dim=-1)
+        dev_m = self.proj_dist.weight.device
+        dev_t = msa.device
 
         # fd reduce memory in inference
         STRIDE = L
         if (not self.training and stride>0):
             STRIDE = stride
 
+        state = self.norm_state(state)
+
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            pair[:,rows] += self.proj_dist(dist_CB[:,rows])
+            msa_i = msa[:,rows].to(dev_m)
+            msa[:,rows] = self.norm_msa(msa_i).to(dev_t,dtype)
+
+            pair_i = pair[:,rows].to(dev_m)
+            pair[:,rows] = self.norm_pair(pair_i).to(dev_t,dtype)
+
+        ## SYMM
+        left = state.to(dev_t,dtype).unsqueeze(2).expand(-1,-1,L,-1)
+        right = state.to(dev_t,dtype).unsqueeze(1).expand(-1,L,-1,-1)
+
+        # recreate Cb given N,Ca,C
+        Cb = get_Cb(xyz[:,:,:3])
+
+        dist_CB = torch.zeros((B,L,L,self.d_rbf), device=dev_t, dtype=left.dtype)
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            dist_CB[:,rows] = rbf(
+                torch.cdist(Cb[:,rows], Cb)
+            ).to(dev_t,dtype)
+
+        if mask_recycle != None:
+            dist_CB = mask_recycle[...,None].to(dev_t,dtype)*dist_CB
+
+        dist_CB = torch.cat((dist_CB, left, right), dim=-1)
+
+        for i in range((L-1)//STRIDE+1):
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+            pair[:,rows] += self.proj_dist(dist_CB[:,rows].to(dev_m)).to(dev_t)
 
         return msa, pair, state
 

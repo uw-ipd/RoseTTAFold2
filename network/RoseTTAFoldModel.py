@@ -6,6 +6,8 @@ from AuxiliaryPredictor import DistanceNetwork, MaskedTokenNetwork, ExpResolvedN
 from util import INIT_CRDS
 from torch import einsum
 
+#from pytorch_memlab import LineProfiler, profile
+
 class RoseTTAFoldModule(nn.Module):
     def __init__(self, n_extra_block=4, n_main_block=8, n_ref_block=4,\
                  d_msa=256, d_msa_full=64, d_pair=128, d_templ=64,
@@ -46,11 +48,12 @@ class RoseTTAFoldModule(nn.Module):
         self.pae_pred = PAENetwork(d_pair)
         self.bind_pred = BinderNetwork() #fd - expose n_hidden as variable?
 
+    #@profile
     def forward(self, msa_latent=None, msa_full=None, seq=None, xyz=None, idx=None,
                 t1d=None, t2d=None, xyz_t=None, alpha_t=None, mask_t=None, same_chain=None,
                 msa_prev=None, pair_prev=None, state_prev=None, mask_recycle=None,
                 return_raw=False, return_full=False,
-                use_checkpoint=False, p2p_crop=-1, topk_crop=-1, low_vram=False,
+                use_checkpoint=False, p2p_crop=-1, topk_crop=-1,
                 symmids=None, symmsub=None, symmRs=None, symmmeta=None):
         if symmids is None:
             symmids = torch.tensor([[0]], device=xyz.device) # C1
@@ -59,11 +62,26 @@ class RoseTTAFoldModule(nn.Module):
         B, N, L = msa_latent.shape[:3]
         dtype = msa_latent.dtype
 
+        # model device
+        dev_m = self.latent_emb.emb.weight.device
+        # input tensor device
+        dev_t = msa_latent.device
+
         # Get embeddings
+        #if (low_vram):
+        #  msa_latent, msa_full, seq, idx, symmids = (
+        #    msa_latent.to(dev_m), msa_full.to(dev_m), seq.to(dev_m), idx.to(dev_m), symmids.to(dev_m)
+        #  )
+
+        #print ('latent_emb')
         msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, symmids)
-        msa_full = self.full_emb(msa_full, seq, idx, oligo)
-        msa_latent, pair, state = msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
-        msa_full = msa_full.to(dtype)
+        msa_latent, pair, state = (
+          msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
+        )
+
+        #print ('full_emb')
+        msa_full = self.full_emb(msa_full.to(dev_m), seq.to(dev_m), idx.to(dev_m), oligo)
+        msa_full = msa_full.to(dev_t, dtype)
 
         #
         # Do recycling
@@ -71,8 +89,11 @@ class RoseTTAFoldModule(nn.Module):
             msa_prev = torch.zeros_like(msa_latent[:,0])
             pair_prev = torch.zeros_like(pair)
             state_prev = torch.zeros_like(state)
-        msa_recycle, pair_recycle, state_recycle = self.recycle(seq, msa_prev, pair_prev, state_prev, xyz, mask_recycle)
-        msa_recycle, pair_recycle, state_recycle = msa_recycle.to(dtype), pair_recycle.to(dtype), state_recycle.to(dtype)
+
+        #print ('recycle')
+        msa_recycle, pair_recycle, state_recycle = self.recycle(
+          seq.to(dev_m), msa_prev, pair_prev, state_prev.to(dev_m), xyz.to(dev_m), mask_recycle)
+        msa_recycle, pair_recycle = msa_recycle.to(dev_t, dtype), pair_recycle.to(dev_t, dtype)
 
         msa_latent[:,0] = msa_latent[:,0] + msa_recycle
         pair = pair + pair_recycle
@@ -84,15 +105,23 @@ class RoseTTAFoldModule(nn.Module):
 
         #
         # add template embedding
-        pair, state = self.templ_emb(t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, symmids=symmids)
+        #print ('templ_emb')
+        pair, state = self.templ_emb(
+          t1d, t2d, alpha_t.to(dev_m), 
+          xyz_t.to(dev_m), mask_t.to(dev_m), 
+          pair, state.to(dev_m),
+          use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, symmids=symmids
+        )
 
         # free unused
         t1d, t2d, alpha_t, xyz_t, mask_t = None, None, None, None, None
 
         # Predict coordinates from given inputs
+        #print ('simulator')
         msa, pair, R, T, alpha, state, symmsub = self.simulator(
             seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, symmids, symmsub, symmRs, symmmeta,
-            use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, topk_crop=topk_crop)
+            use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, topk_crop=topk_crop, 
+        )
 
         if return_raw:
             # get last structure
@@ -100,24 +129,37 @@ class RoseTTAFoldModule(nn.Module):
             return msa[:,0], pair, state, xyz, alpha[-1], None
 
         # predict masked amino acids
-        logits_aa = self.aa_pred(msa)
-        #
+        logits_aa = self.aa_pred(msa.to(dev_m))
+        msa, logits_aa = msa.to(dev_t), logits_aa.to(dev_t)
+
+        pair,same_chain = pair.to(dev_m), same_chain.to(dev_m)
         # predict distogram & orientograms
         logits = self.c6d_pred(pair)
-        
-        # Predict LDDT
-        lddt = self.lddt_pred(state)
-
-        # predict experimentally resolved or not
-        logits_exp = self.exp_pred(msa[:,0], state)
-        
         # predict PAE
         logits_pae = self.pae_pred(pair)
-
         # predict bind/no-bind
         p_bind = self.bind_pred(logits_pae,same_chain)
+        pair, same_chain, logits_pae, p_bind = (
+            pair.to(dev_t), same_chain.to(dev_t), 
+            logits_pae.to(dev_t), p_bind.to(dev_t)
+        )
+        logits = (x.to(dev_t) for x in logits)
+
+        # Predict LDDT
+        state = state.to(dev_m)
+        lddt = self.lddt_pred(state)
+        state, lddt = state.to(dev_t), lddt.to(dev_t)
+
+        # predict experimentally resolved or not
+        msa0 = msa[:,0]
+        msa0, state = msa0.to(dev_m), state.to(dev_m)
+        logits_exp = self.exp_pred(msa0, state)
+        msa0, state, logits_exp = msa0.to(dev_t), state.to(dev_t), logits_exp.to(dev_t)
+
 
         # get all intermediate bb structures
+        R, xyz, T = R.to(dev_m), xyz.to(dev_m), T.to(dev_m)
         xyz = einsum('rblij,blaj->rblai', R, xyz-xyz[:,:,1].unsqueeze(-2)) + T.unsqueeze(-2)
-        
+        R, xyz, T = R.to(dev_t), xyz.to(dev_t), T.to(dev_t)
+
         return logits, logits_aa, logits_exp, logits_pae, p_bind, xyz, alpha, symmsub, lddt, msa[:,0], pair, state

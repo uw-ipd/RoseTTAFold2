@@ -257,6 +257,7 @@ def make_topk_graph(xyz, pair, idx, top_k=128, kmin=32, eps=1e-6):
     G = dgl.graph((src, tgt), num_nodes=B*L).to(device)
     G.edata['rel_pos'] = (xyz[b,j,:] - xyz[b,i,:]).detach() # no gradient through basis function
 
+    b,i,j = b.to(pair.device), i.to(pair.device), j.to(pair.device)
     pair_i = pair[b,i,j][...,None] #extract_pair_features(pair,b,i,j, symmids)
 
     return G, pair_i

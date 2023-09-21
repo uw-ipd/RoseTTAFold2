@@ -201,7 +201,7 @@ class PairStr2Pair(nn.Module):
         return pair
 
     #@profile
-    def forward(self, pair, rbf_feat, state, crop=-1, stride=512):
+    def forward(self, pair, rbf_feat, state, crop=-1, stride=256):
         B,L = pair.shape[:2]
 
         dev_m = self.emb_rbf.weight.device

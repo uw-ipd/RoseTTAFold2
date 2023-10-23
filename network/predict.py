@@ -24,7 +24,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 def get_args():
     default_model = os.path.dirname(__file__)+"/weights/RF2_apr23.pt"
-    print (default_model)
 
     import argparse
     parser = argparse.ArgumentParser(description="RoseTTAFold2NA")
@@ -157,7 +156,10 @@ def merge_a3m_homo(msa_orig, ins_orig, nmer, mode="default"):
 class Predictor():
     def __init__(self, model_weights, device="cuda:0"):
         # define model name
-        self.model_weights = model_weights
+        if (model_weights[0] == '/'):
+            self.model_weights = model_weights
+        else:
+            self.model_weights = os.path.dirname(__file__) + '/' + model_weights
         self.device = device
         self.active_fn = nn.Softmax(dim=1)
 
@@ -180,6 +182,7 @@ class Predictor():
 
 
     def load_model(self, model_weights):
+        print (model_weights)
         if not os.path.exists(model_weights):
             return False
         checkpoint = torch.load(model_weights, map_location=self.device)
@@ -191,6 +194,10 @@ class Predictor():
         n_recycles=4, n_models=1, subcrop=-1, nseqs=256, nseqs_full=2048,
         n_templ=4, msa_mask=0.0, is_training=False, msa_concat_mode="diag"
     ):
+        def to_ranges(txt):
+            return [[int(x) for x in r.strip().split('-')]
+                    for r in txt.strip().split(',')]
+
         self.xyz_converter = self.xyz_converter.cpu()
 
         ###
@@ -198,15 +205,38 @@ class Predictor():
         Ls_blocked, Ls, msas, inss = [], [], [], []
         for i,seq_i in enumerate(inputs):
             fseq_i =  seq_i.split(':')
-            a3m_i = fseq_i[0]
+            fseq_ii =  seq_i.split('[')
+            a3m_i = fseq_ii[0]
             msa_i, ins_i, Ls_i = parse_a3m(a3m_i)
             msa_i = torch.tensor(msa_i).long()
             ins_i = torch.tensor(ins_i).long()
             if (msa_i.shape[0] > nseqs_full):
                 idxs_tokeep = np.random.permutation(msa_i.shape[0])[:nseqs_full]
-                idxs_tokeep[0] = 0  # keep best
+                idxs_tokeep[0] = 0  # keep self
                 msa_i = msa_i[idxs_tokeep]
                 ins_i = ins_i[idxs_tokeep]
+
+            if (len(fseq_ii)==2):
+                if fseq_ii[1][-1] == ']':
+                    fseq_ii[1] = fseq_ii[1][:-1] # trim trailing ']'
+                ranges = to_ranges(fseq_ii[1])
+
+                maskres = torch.zeros(msa_i.shape[1],dtype=torch.bool)
+                for r in ranges:
+                    if (len(r))>1:
+                        rstart,rstop = r[0]-1, r[1]
+                    else:
+                        rstart,rstop = r[0]-1, r[0]
+                    maskres[rstart:rstop] = True
+
+                msa_i = msa_i[:,maskres]
+                ins_i = ins_i[:,maskres]
+
+                Ls_new, L_start = [], 0
+                for L_i in Ls_i:
+                    Ls_new.append( torch.sum(maskres[L_start:(L_start+L_i)]) )
+                    L_start += L_i
+                Ls_i = Ls_new
 
             msas.append(msa_i)
             inss.append(ins_i)
@@ -246,6 +276,14 @@ class Predictor():
                 xyz_t_i, t1d_i, mask_t_i = read_templates(Ls_blocked[i], ffdb, hhr_i, atab_i, n_templ=n_templ)
                 ntmpl_i = xyz_t_i.shape[0]
                 maxtmpl = max(maxtmpl, ntmpl_i)
+                xyz_t[:ntmpl_i,startres:stopres,:,:] = xyz_t_i
+                t1d[:ntmpl_i,startres:stopres,:] = t1d_i
+                mask_t[:ntmpl_i,startres:stopres,:] = mask_t_i
+            elif (len(fseq_i) == 2):
+                templ_fn = fseq_i[1]
+                startres,stopres = sum(Ls_blocked[:i]), sum(Ls_blocked[:(i+1)])
+                xyz_t_i, t1d_i, mask_t_i = read_template_pdb(Ls_blocked[i], templ_fn, align_conf=0.2)
+                ntmpl_i = 1
                 xyz_t[:ntmpl_i,startres:stopres,:,:] = xyz_t_i
                 t1d[:ntmpl_i,startres:stopres,:] = t1d_i
                 mask_t[:ntmpl_i,startres:stopres,:] = mask_t_i
@@ -437,15 +475,19 @@ class Predictor():
                 prob_s.append(prob)
 
         # full complex
+        xyz_prev = xyz_prev.float().cpu()
         symmRs = symmRs.cpu()
         best_xyzfull = torch.zeros( (B,O*Lasu,27,3),device=best_xyz.device )
         best_xyzfull[:,:Lasu] = best_xyz[:,:Lasu]
+        last_xyzfull = torch.zeros( (B,O*Lasu,27,3),device=xyz_prev.device )
+        last_xyzfull[:,:Lasu] = xyz_prev[:,:Lasu]
         seq_full = torch.zeros( (B,O*Lasu),dtype=seq.dtype, device=seq.device )
         seq_full[:,:Lasu] = seq[:,:Lasu]
         best_lddtfull = torch.zeros( (B,O*Lasu),device=best_lddt.device )
         best_lddtfull[:,:Lasu] = best_lddt[:,:Lasu]
         for i in range(1,O):
             best_xyzfull[:,(i*Lasu):((i+1)*Lasu)] = torch.einsum('ij,braj->brai', symmRs[i], best_xyz[:,:Lasu])
+            last_xyzfull[:,(i*Lasu):((i+1)*Lasu)] = torch.einsum('ij,braj->brai', symmRs[i], xyz_prev[:,:Lasu])
             seq_full[:,(i*Lasu):((i+1)*Lasu)] = seq[:,:Lasu]
             best_lddtfull[:,(i*Lasu):((i+1)*Lasu)] = best_lddt[:,:Lasu]
 
@@ -456,19 +498,29 @@ class Predictor():
         #outdata['monomer_rms'] = monomer_rms.item()
         #outdata['complex_rms'] = complex_rms.item()
         outdata['mean_plddt'] = best_lddt.mean().item()
-        for i in range(O):
-            outdata['pae_chain0_'+str(i)] = 0.5 * (best_pae[:,0:Lasu,i*Lasu:(i+1)*Lasu].mean() + best_pae[:,i*Lasu:(i+1)*Lasu,0:Lasu].mean()).item()
+        Lstarti = 0
+        for i,li in enumerate(L_s):
+            Lstartj = 0
+            for j,lj in enumerate(L_s):
+                if (j>i):
+                  outdata['pae_chain_'+str(i)+'_'+str(j)] = 0.5 * (
+                      best_pae[:, Lstarti:(Lstarti+li), Lstartj:(Lstartj+lj)].mean() 
+                      + best_pae[:, Lstartj:(Lstartj+lj),Lstarti:(Lstarti+li)].mean()
+                  ).item()
+                Lstartj += lj
+            Lstarti += li
 
         with open("%s.json"%(out_prefix), "w") as outfile:
             json.dump(outdata, outfile, indent=4)
 
-        util.writepdb("%s_pred.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
+        util.writepdb("%s_pred_best.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
+        #util.writepdb("%s_pred_last.pdb"%(out_prefix), last_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
 
-        prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
-        np.savez_compressed("%s.npz"%(out_prefix),
-            dist=prob_s[0].astype(np.float16),
-            lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
-            pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
+        #prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
+        #np.savez_compressed("%s.npz"%(out_prefix),
+        #    dist=prob_s[0].astype(np.float16),
+        #    lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
+        #    pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
 
 
 

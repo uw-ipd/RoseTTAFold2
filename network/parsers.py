@@ -362,10 +362,11 @@ def read_template_pdb(qlen, templ_fn, align_conf=1.0):
                 continue
             seq[idx] = aa_idx
     
-    mask = torch.logical_not(torch.isnan(xyz[:,:3,0])) # (qlen, 3)
-    mask = mask.all(dim=-1) # (qlen)
+    maskaa = torch.logical_not(torch.isnan(xyz[:,:,0])) # (qlen, 3)
+    mask = maskaa[:,:3].all(dim=-1) # (qlen)
     conf = torch.where(mask, torch.tensor(align_conf).float(), torch.zeros(qlen, dtype=xyz.dtype))
     seq = torch.nn.functional.one_hot(seq, num_classes=21).float()
     t1d = torch.cat((seq, conf[:,None]), -1)
+    xyz = xyz.nan_to_num()
 
-    return xyz[None], t1d[None]
+    return xyz[None], t1d[None], maskaa[None]

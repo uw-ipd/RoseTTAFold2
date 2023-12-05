@@ -161,10 +161,10 @@ def merge_a3m_homo(msa_orig, ins_orig, nmer, mode="default"):
 class Predictor():
     def __init__(self, model_weights, device="cuda:0"):
         # define model name
-        if (model_weights[0] == '/'):
-            self.model_weights = model_weights
-        else:
+        self.model_weights = model_weights
+        if not os.path.exists(model_weights):
             self.model_weights = os.path.dirname(__file__) + '/' + model_weights
+
         self.device = device
         self.active_fn = nn.Softmax(dim=1)
 
@@ -174,6 +174,9 @@ class Predictor():
         ).to(self.device)
 
         could_load = self.load_model(self.model_weights)
+        if not could_load:
+
+
         if not could_load:
             print ("ERROR: failed to load model")
             sys.exit()
@@ -186,7 +189,6 @@ class Predictor():
 
 
     def load_model(self, model_weights):
-        print (model_weights)
         if not os.path.exists(model_weights):
             return False
         checkpoint = torch.load(model_weights, map_location=self.device)

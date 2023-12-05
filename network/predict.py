@@ -175,9 +175,6 @@ class Predictor():
 
         could_load = self.load_model(self.model_weights)
         if not could_load:
-
-
-        if not could_load:
             print ("ERROR: failed to load model")
             sys.exit()
 

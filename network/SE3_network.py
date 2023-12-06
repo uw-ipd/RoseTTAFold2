@@ -87,7 +87,4 @@ class SE3TransformerWrapper(nn.Module):
             node_features = {'0': type_0_features}
         edge_features = {'0': edge_features}
 
-        from memory import mem_report
-        mem_report()
-
         return self.se3(G, node_features, edge_features)

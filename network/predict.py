@@ -23,7 +23,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # fd temp for testing
-#torch.cuda.set_per_process_memory_fraction(15360/32510, 0)
+torch.cuda.set_per_process_memory_fraction(14000./32510., 0)
 
 def get_args():
     default_model = os.path.dirname(__file__)+"/weights/RF2_apr23.pt"
@@ -42,8 +42,8 @@ def get_args():
     parser.add_argument("-model", default=default_model, help="Model weights. [weights/RF2_apr23.pt]")
     parser.add_argument("-n_recycles", default=3, type=int, help="Number of recycles to use [3].")
     parser.add_argument("-n_models", default=1, type=int, help="Number of models to predict [1].")
-    parser.add_argument("-subcrop", default=2048, type=int, help="Subcrop pair-to-pair updates. A value of -1 means no subcropping. [-1]")
-    parser.add_argument("-topk", default=2048, type=int, help="Limit number of residue-pair neighbors in structure updates. A value of -1 means no subcropping. [2048]")
+    parser.add_argument("-subcrop", default=-1, type=int, help="Subcrop pair-to-pair updates. A value of -1 means no subcropping. [-1]")
+    parser.add_argument("-topk", default=1548, type=int, help="Limit number of residue-pair neighbors in structure updates. A value of -1 means no subcropping. [2048]")
     parser.add_argument("-low_vram", default=False, help="Offload some computations to CPU to allow larger systems in low VRAM. [False]", action='store_true')
     parser.add_argument("-nseqs", default=256, type=int, help="The number of MSA sequences to sample in the main 1D track [256].")
     parser.add_argument("-nseqs_full", default=2048, type=int, help="The number of MSA sequences to sample in the wide-MSA 1D track [2048].")
@@ -436,8 +436,8 @@ class Predictor():
 
                 with torch.cuda.amp.autocast(True):
                     #fd memory savings
-                    msa_seed = msa_seed.half()
-                    msa_extra = msa_extra.half()
+                    msa_seed = msa_seed.half()  # GPU ONLY
+                    msa_extra = msa_extra.half()  # GPU ONLY
                     t1d = t1d.half()
                     t2d = t2d.half()
 
@@ -474,6 +474,7 @@ class Predictor():
 
                 logit_s = [l.cpu() for l in logit_s]
                 logit_aa_s = [l.cpu() for l in logit_aa_s]
+                logits_pae = None
 
                 torch.cuda.empty_cache()
                 if pred_lddt.mean() < best_lddt.mean():

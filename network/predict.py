@@ -23,7 +23,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # fd temp for testing
-torch.cuda.set_per_process_memory_fraction(14000./32510., 0)
+#torch.cuda.set_per_process_memory_fraction(14000./32510., 0)
 
 def get_args():
     default_model = os.path.dirname(__file__)+"/weights/RF2_apr23.pt"
@@ -533,11 +533,11 @@ class Predictor():
         util.writepdb("%s_pred_best.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
         #util.writepdb("%s_pred_last.pdb"%(out_prefix), last_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
 
-        #prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
-        #np.savez_compressed("%s.npz"%(out_prefix),
-        #    dist=prob_s[0].astype(np.float16),
-        #    lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
-        #    pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
+        prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
+        np.savez_compressed("%s.npz"%(out_prefix),
+            dist=prob_s[0].astype(np.float16),
+            lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
+            pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
 
 
 

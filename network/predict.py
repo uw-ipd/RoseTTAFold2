@@ -23,7 +23,7 @@ import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 # fd temp for testing
-#torch.cuda.set_per_process_memory_fraction(14000./32510., 0)
+#torch.cuda.set_per_process_memory_fraction(15000./32510., 0)
 
 def get_args():
     default_model = os.path.dirname(__file__)+"/weights/RF2_apr23.pt"
@@ -378,16 +378,16 @@ class Predictor():
         msa_mask=0.0,
     ):
         if low_vram:
-          dev_tensor = torch.device("cpu")
+          dev_t = torch.device("cpu")
         else:
-          dev_tensor = self.device
+          dev_t = self.device
 
-        self.xyz_converter = self.xyz_converter.to(dev_tensor)
-        self.lddt_bins = self.lddt_bins.to(dev_tensor)
+        self.xyz_converter = self.xyz_converter.to(self.device)
+        self.lddt_bins = self.lddt_bins.to(self.device)
 
         with torch.no_grad():
-            msa = msa_orig.long().to(dev_tensor) # (N, L)
-            ins = ins_orig.long().to(dev_tensor)
+            msa = msa_orig.long().to(self.device) # (N, L)
+            ins = ins_orig.long().to(self.device)
 
             print(f"N={msa.shape[0]} L={msa.shape[1]}")
             N, L = msa.shape[:2]
@@ -397,18 +397,18 @@ class Predictor():
 
             B = 1
             #
-            t1d = t1d.to(dev_tensor)
-            t2d = t2d.to(dev_tensor)
-            idx_pdb = idx_pdb.to(dev_tensor)
-            xyz_t = xyz_t.to(dev_tensor)
-            mask_t = mask_t.to(dev_tensor)
-            alpha_t = alpha_t.to(dev_tensor)
-            xyz_prev = xyz_prev.to(dev_tensor)
-            mask_prev = mask_prev.to(dev_tensor)
-            same_chain = same_chain.to(dev_tensor)
-            symmids = symmids.to(dev_tensor)
-            symmsub = symmsub.to(dev_tensor)
-            symmRs = symmRs.to(dev_tensor)
+            t1d = t1d.to(self.device).half()
+            t2d = t2d.to(dev_t).half()
+            idx_pdb = idx_pdb.to(self.device)
+            xyz_t = xyz_t.to(self.device)
+            mask_t = mask_t.to(self.device)
+            alpha_t = alpha_t.to(self.device)
+            xyz_prev = xyz_prev.to(self.device)
+            mask_prev = mask_prev.to(self.device)
+            same_chain = same_chain.to(self.device)
+            symmids = symmids.to(self.device)
+            symmsub = symmsub.to(self.device)
+            symmRs = symmRs.to(self.device)
 
             subsymms, _ = symmmeta
             for i in range(len(subsymms)):
@@ -421,7 +421,7 @@ class Predictor():
             mask_recycle = mask_recycle[:,:,None]*mask_recycle[:,None,:] # (B, L, L)
             mask_recycle = same_chain.float()*mask_recycle.float()
 
-            best_lddt = torch.tensor([-1.0], device=dev_tensor)
+            best_lddt = torch.tensor([-1.0], device=self.device)
             best_xyz = None
             best_logit = None
             best_aa = None
@@ -438,8 +438,6 @@ class Predictor():
                     #fd memory savings
                     msa_seed = msa_seed.half()  # GPU ONLY
                     msa_extra = msa_extra.half()  # GPU ONLY
-                    t1d = t1d.half()
-                    t2d = t2d.half()
 
                     logit_s, logit_aa_s, _, logits_pae, p_bind, xyz_prev, alpha, symmsub, pred_lddt, msa_prev, pair_prev, state_prev = self.model(
                                                                msa_seed, msa_extra,
@@ -457,14 +455,14 @@ class Predictor():
                                                                symmids=symmids,
                                                                symmsub=symmsub,
                                                                symmRs=symmRs,
-                                                               symmmeta=symmmeta )
+                                                               symmmeta=symmmeta,
+                                                               low_vram=low_vram )
 
                     alpha = alpha[-1].to(seq.device)
                     xyz_prev = xyz_prev[-1].to(seq.device)
                     _, xyz_prev = self.xyz_converter.compute_all_atom(seq, xyz_prev, alpha)
                     mask_recycle=None
 
-                #fd might be slow with low_vram
                 pred_lddt = nn.Softmax(dim=1)(pred_lddt.float()) * self.lddt_bins[None,:,None]
                 pred_lddt = pred_lddt.sum(dim=1)
                 pae = pae_unbin(logits_pae.float())
@@ -539,6 +537,7 @@ class Predictor():
             lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
             pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
 
+        #torch.save({'seq':seq_full[0], 'xyz':best_xyzfull[0], 'chainlens':L_s}, "%s.pt"%(out_prefix))
 
 
 if __name__ == "__main__":
@@ -571,4 +570,3 @@ if __name__ == "__main__":
         nseqs=args.nseqs, 
         nseqs_full=args.nseqs_full, 
         ffdb=ffdb)
-

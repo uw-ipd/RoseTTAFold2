@@ -54,7 +54,8 @@ class RoseTTAFoldModule(nn.Module):
                 msa_prev=None, pair_prev=None, state_prev=None, mask_recycle=None,
                 return_raw=False, return_full=False,
                 use_checkpoint=False, p2p_crop=-1, topk_crop=-1,
-                symmids=None, symmsub=None, symmRs=None, symmmeta=None):
+                symmids=None, symmsub=None, symmRs=None, symmmeta=None,
+                low_vram=False):
         if symmids is None:
             symmids = torch.tensor([[0]], device=xyz.device) # C1
         oligo = symmids.shape[0]
@@ -62,38 +63,31 @@ class RoseTTAFoldModule(nn.Module):
         B, N, L = msa_latent.shape[:3]
         dtype = msa_latent.dtype
 
-        # model device
-        dev_m = self.latent_emb.emb.weight.device
-        # input tensor device
-        dev_t = msa_latent.device
+        # model and pair device
+        dev_model = self.latent_emb.emb.weight.device
+        if (low_vram):
+            dev_pair = torch.device('cpu')
+        else:
+            dev_pair = dev_model
 
         # Get embeddings
-        #if (low_vram):
-        #  msa_latent, msa_full, seq, idx, symmids = (
-        #    msa_latent.to(dev_m), msa_full.to(dev_m), seq.to(dev_m), idx.to(dev_m), symmids.to(dev_m)
-        #  )
-
-        #print ('latent_emb')
-        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, symmids)
+        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, dev_pair=dev_pair)
         msa_latent, pair, state = (
           msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
         )
 
-        #print ('full_emb')
-        msa_full = self.full_emb(msa_full.to(dev_m), seq.to(dev_m), idx.to(dev_m), oligo)
-        msa_full = msa_full.to(dev_t, dtype)
+        msa_full = self.full_emb(msa_full, seq, idx, oligo)
+        msa_full = msa_full.to(dtype)
 
-        #
         # Do recycling
         if msa_prev == None:
             msa_prev = torch.zeros_like(msa_latent[:,0])
             pair_prev = torch.zeros_like(pair)
             state_prev = torch.zeros_like(state)
 
-        #print ('recycle')
         msa_recycle, pair_recycle, state_recycle = self.recycle(
-          seq.to(dev_m), msa_prev, pair_prev, state_prev.to(dev_m), xyz.to(dev_m), mask_recycle)
-        msa_recycle, pair_recycle = msa_recycle.to(dev_t, dtype), pair_recycle.to(dev_t, dtype)
+          seq, msa_prev, pair_prev, state_prev, xyz, mask_recycle)
+        msa_recycle, pair_recycle = msa_recycle.to(dtype), pair_recycle.to(dev_pair, dtype)
 
         msa_latent[:,0] = msa_latent[:,0] + msa_recycle
         pair = pair + pair_recycle
@@ -107,9 +101,7 @@ class RoseTTAFoldModule(nn.Module):
         # add template embedding
         #print ('templ_emb')
         pair, state = self.templ_emb(
-          t1d, t2d, alpha_t.to(dev_m), 
-          xyz_t.to(dev_m), mask_t.to(dev_m), 
-          pair, state.to(dev_m),
+          t1d, t2d, alpha_t, xyz_t, mask_t, pair, state,
           use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, symmids=symmids
         )
 
@@ -129,37 +121,29 @@ class RoseTTAFoldModule(nn.Module):
             return msa[:,0], pair, state, xyz, alpha[-1], None
 
         # predict masked amino acids
-        logits_aa = self.aa_pred(msa.to(dev_m))
-        msa, logits_aa = msa.to(dev_t), logits_aa.to(dev_t)
+        logits_aa = self.aa_pred(msa)
 
-        pair,same_chain = pair.to(dev_m), same_chain.to(dev_m)
+        pair,same_chain = pair.to(dev_model), same_chain.to(dev_model)
+
         # predict distogram & orientograms
         logits = self.c6d_pred(pair)
         # predict PAE
         logits_pae = self.pae_pred(pair)
         # predict bind/no-bind
         p_bind = self.bind_pred(logits_pae,same_chain)
+
         pair, same_chain, logits_pae, p_bind = (
-            pair.to(dev_t), same_chain.to(dev_t), 
-            logits_pae.to(dev_t), p_bind.to(dev_t)
+            pair.to(dev_pair), same_chain.to(dev_pair), 
+            logits_pae.to(dev_pair), p_bind
         )
-        logits = (x.to(dev_t) for x in logits)
 
         # Predict LDDT
-        state = state.to(dev_m)
         lddt = self.lddt_pred(state)
-        state, lddt = state.to(dev_t), lddt.to(dev_t)
 
         # predict experimentally resolved or not
-        msa0 = msa[:,0]
-        msa0, state = msa0.to(dev_m), state.to(dev_m)
-        logits_exp = self.exp_pred(msa0, state)
-        msa0, state, logits_exp = msa0.to(dev_t), state.to(dev_t), logits_exp.to(dev_t)
-
+        logits_exp = self.exp_pred(msa[:,0], state)
 
         # get all intermediate bb structures
-        R, xyz, T = R.to(dev_m), xyz.to(dev_m), T.to(dev_m)
         xyz = einsum('rblij,blaj->rblai', R, xyz-xyz[:,:,1].unsqueeze(-2)) + T.unsqueeze(-2)
-        R, xyz, T = R.to(dev_t), xyz.to(dev_t), T.to(dev_t)
 
         return logits, logits_aa, logits_exp, logits_pae, p_bind, xyz, alpha, symmsub, lddt, msa[:,0], pair, state

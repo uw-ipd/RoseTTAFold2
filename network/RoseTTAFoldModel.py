@@ -71,7 +71,7 @@ class RoseTTAFoldModule(nn.Module):
             dev_pair = dev_model
 
         # Get embeddings
-        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, dev_pair=dev_pair)
+        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx)#, dev_pair=dev_pair)
         msa_latent, pair, state = (
           msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
         )

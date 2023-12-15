@@ -241,7 +241,7 @@ class Templ_emb(nn.Module):
         right = t1d.to(dev_pair).unsqueeze(2).expand(-1,-1,L,-1,-1)
         #
         templ = torch.cat((t2d, left, right), -1) # (B, T, L, L, 88)
-        out = torch.zeros((B,T,L,L,self.d_templ), device=dev_pair, dtype=t1d.dtype)
+        out = torch.zeros((B,T,L,L,self.d_templ), device=dev_pair, dtype=t2d.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
             out[:,:,rows] = self.emb(templ[:,:,rows].to(dev_model)).to(dev_pair)

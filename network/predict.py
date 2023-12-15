@@ -22,9 +22,6 @@ import random
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
-# fd temp for testing
-#torch.cuda.set_per_process_memory_fraction(15000./32510., 0)
-
 def get_args():
     default_model = os.path.dirname(__file__)+"/weights/RF2_apr23.pt"
 
@@ -378,9 +375,9 @@ class Predictor():
         msa_mask=0.0,
     ):
         if low_vram:
-          dev_t = torch.device("cpu")
+            dev_pair = torch.device("cpu")
         else:
-          dev_t = self.device
+            dev_pair = self.device
 
         self.xyz_converter = self.xyz_converter.to(self.device)
         self.lddt_bins = self.lddt_bins.to(self.device)
@@ -398,7 +395,7 @@ class Predictor():
             B = 1
             #
             t1d = t1d.to(self.device).half()
-            t2d = t2d.to(dev_t).half()
+            t2d = t2d.to(dev_pair).half()
             idx_pdb = idx_pdb.to(self.device)
             xyz_t = xyz_t.to(self.device)
             mask_t = mask_t.to(self.device)
@@ -426,6 +423,7 @@ class Predictor():
             best_logit = None
             best_aa = None
             best_pae = None
+
             for i_cycle in range(n_recycles + 1):
                 seq, msa_seed_orig, msa_seed, msa_extra, mask_msa = MSAFeaturize(
                     msa, ins, p_mask=msa_mask, params={'MAXLAT': nseqs, 'MAXSEQ': nseqs_full, 'MAXCYCLE': 1})
@@ -528,7 +526,7 @@ class Predictor():
         with open("%s.json"%(out_prefix), "w") as outfile:
             json.dump(outdata, outfile, indent=4)
 
-        util.writepdb("%s_pred_best.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
+        util.writepdb("%s_pred.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
         #util.writepdb("%s_pred_last.pdb"%(out_prefix), last_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
 
         prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
@@ -570,3 +568,4 @@ if __name__ == "__main__":
         nseqs=args.nseqs, 
         nseqs_full=args.nseqs_full, 
         ffdb=ffdb)
+

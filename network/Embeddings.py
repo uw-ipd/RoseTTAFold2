@@ -22,16 +22,12 @@ class PositionalEncoding2D(nn.Module):
         self.emb = nn.Embedding(self.nbin, d_model)
         self.d_out = d_model
     
-    def forward(self, idx, dev=None, stride=1024):
+    def forward(self, idx, stride):
         B, L = idx.shape[:2]
 
-        if dev is None:
-          dev = idx.device
-        dev_m = idx.device
+        bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
 
-        bins = torch.arange(self.minpos, self.maxpos, device=dev_m)
-
-        seqsep = torch.full((B,L,L),100, device=dev)
+        seqsep = torch.full((B,L,L),100, device=idx.device)
         seqsep[0] = idx[0,None,:] - idx[0,:,None] # (B, L, L)
 
         # fd reduce memory in inference
@@ -39,13 +35,13 @@ class PositionalEncoding2D(nn.Module):
         if (not self.training and stride>0):
             STRIDE = stride
 
-        emb = torch.zeros((B,L,L,self.d_out), device=dev)
+        emb = torch.zeros((B,L,L,self.d_out), device=idx.device)
         for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=dev)[:,None]
+            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=idx.device)[:,None]
             for j in range((L-1)//STRIDE+1):
-                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=dev)[None,:]
-                ib = torch.bucketize(seqsep[:,rows,cols].to(dev_m), bins).long()
-                emb[:,rows,cols] = self.emb(ib).to(dev)
+                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=idx.device)[None,:]
+                ib = torch.bucketize(seqsep[:,rows,cols], bins).long()
+                emb[:,rows,cols] = self.emb(ib)
 
         return emb
 
@@ -75,7 +71,7 @@ class MSA_emb(nn.Module):
 
         nn.init.zeros_(self.emb.bias)
 
-    def forward(self, msa, seq, idx, dev_pair=None):
+    def forward(self, msa, seq, idx, stride):
         # Inputs:
         #   - msa: Input MSA (B, N, L, d_init)
         #   - seq: Input Sequence (B, L)
@@ -86,9 +82,6 @@ class MSA_emb(nn.Module):
 
         B, N, L = msa.shape[:3]
 
-        if (dev_pair is None):
-            dev_pair = msa.device
-
         # msa embedding 
         msa = self.emb(msa) # (B, N, L, d_model) # MSA embedding
         tmp = self.emb_q(seq).unsqueeze(1) # (B, 1, L, d_model) -- query embedding
@@ -97,8 +90,8 @@ class MSA_emb(nn.Module):
         # pair embedding 
         left = self.emb_left(seq)[:,None] # (B, 1, L, d_pair)
         right = self.emb_right(seq)[:,:,None] # (B, L, 1, d_pair)
-        pair = (left.to(dev_pair) + right.to(dev_pair)) # (B, L, L, d_pair)
-        pair += self.pos(idx, dev_pair) # add relative position
+        pair = (left + right) # (B, L, L, d_pair)
+        pair += self.pos(idx, stride) # add relative position
 
         # state embedding
         state = self.emb_state(seq) #.repeat(oligo,1,1)
@@ -156,12 +149,8 @@ class TemplatePairStack(nn.Module):
         self.proj_t1d = init_lecun_normal(self.proj_t1d)
         nn.init.zeros_(self.proj_t1d.bias)
 
-    def forward(self, templ, rbf_feat, t1d, use_checkpoint=False, p2p_crop=-1, dev_pair=None, stride=256):
+    def forward(self, templ, rbf_feat, t1d, strides, use_checkpoint=False, p2p_crop=-1):
         B, T, L = templ.shape[:3]
-
-        dev_model = self.proj_t1d.weight.device
-        if dev_pair is None:
-            dev_pair = templ.device
 
         templ = templ.reshape(B*T, L, L, -1)
         t1d = t1d.reshape(B*T, L, -1)
@@ -169,19 +158,19 @@ class TemplatePairStack(nn.Module):
 
         for i_block in range(self.n_block):
             if use_checkpoint:
-                templ = checkpoint.checkpoint(create_custom_forward(self.block[i_block]), templ, rbf_feat, state.to(dev_m), p2p_crop) 
+                templ = checkpoint.checkpoint(create_custom_forward(self.block[i_block]), templ, rbf_feat, state, strides, p2p_crop) 
             else:
-                templ = self.block[i_block](templ, rbf_feat, state, p2p_crop)
+                templ = self.block[i_block](templ, rbf_feat, state, strides, p2p_crop)
 
         # fd reduce memory in inference
         STRIDE = L
-        if (not self.training and stride>0):
-            STRIDE = stride
+        if (not self.training and strides['templ_pair']>0):
+            STRIDE = strides['templ_pair']
 
-        out = torch.zeros((B*T,L,L,self.d_out), device=dev_pair, dtype=t1d.dtype)
+        out = torch.zeros((B*T,L,L,self.d_out), device=templ.device, dtype=t1d.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            out[:,:,rows] = self.norm(templ[:,:,rows].to(dev_model)).to(dev_pair,t1d.dtype)
+            out[:,:,rows] = self.norm(templ[:,:,rows]).to(t1d.dtype)
 
         return out.reshape(B, T, L, L, -1)
 
@@ -224,12 +213,8 @@ class Templ_emb(nn.Module):
         nn.init.kaiming_normal_(self.proj_t1d.weight, nonlinearity='relu')
         nn.init.zeros_(self.proj_t1d.bias)
     
-    def _get_templ_emb(self, t1d, t2d, dev_pair = None, stride=256):
+    def _get_templ_emb(self, t1d, t2d, stride):
         B, T, L, _ = t1d.shape
-
-        dev_model = self.emb.weight.device
-        if dev_pair is None:
-          dev_pair = t2d.device
 
         # fd reduce memory in inference
         STRIDE = L
@@ -237,22 +222,19 @@ class Templ_emb(nn.Module):
             STRIDE = stride
 
         # Prepare 2D template features
-        left = t1d.to(dev_pair).unsqueeze(3).expand(-1,-1,-1,L,-1)
-        right = t1d.to(dev_pair).unsqueeze(2).expand(-1,-1,L,-1,-1)
+        left = t1d.unsqueeze(3).expand(-1,-1,-1,L,-1)
+        right = t1d.unsqueeze(2).expand(-1,-1,L,-1,-1)
         #
         templ = torch.cat((t2d, left, right), -1) # (B, T, L, L, 88)
-        out = torch.zeros((B,T,L,L,self.d_templ), device=dev_pair, dtype=t2d.dtype)
+        out = torch.zeros((B,T,L,L,self.d_templ), device=t1d.device, dtype=t2d.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            out[:,:,rows] = self.emb(templ[:,:,rows].to(dev_model)).to(dev_pair)
+            out[:,:,rows] = self.emb(templ[:,:,rows])
 
         return out # Template templures (B, T, L, L, d_templ)
 
-    def _get_templ_rbf(self, xyz_t, mask_t, dev_pair = None, stride=256):
+    def _get_templ_rbf(self, xyz_t, mask_t, stride):
         B, T, L = xyz_t.shape[:3]
-
-        if dev_pair is None:
-          dev_pair = xyz_t.device
 
         # fd reduce memory in inference
         STRIDE = L
@@ -263,7 +245,7 @@ class Templ_emb(nn.Module):
         xyz_t = xyz_t.reshape(B*T, L, 3)
         mask_t = mask_t.reshape(B*T, L, L)
 
-        rbf_feat = torch.zeros((B*T,L,L,self.d_rbf), device=dev_pair, dtype=xyz_t.dtype)
+        rbf_feat = torch.zeros((B*T,L,L,self.d_rbf), device=xyz_t.device, dtype=xyz_t.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
 
@@ -271,13 +253,13 @@ class Templ_emb(nn.Module):
             #print (rbf_i.shape, mask_t[:,rows].shape)
             rbf_i *= mask_t[:,rows].unsqueeze(-1)
 
-            rbf_feat[:,rows] = rbf_i.to(dev_pair,xyz_t.dtype)
+            rbf_feat[:,rows] = rbf_i.to(xyz_t.dtype)
 
         return rbf_feat
     
     def forward(
-      self, t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, 
-      use_checkpoint=False, p2p_crop=-1, symmids=None, stride=256
+      self, t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, strides, 
+      use_checkpoint=False, p2p_crop=-1, symmids=None
     ):
         # Input
         #   - t1d: 1D template info (B, T, L, 22)
@@ -292,12 +274,13 @@ class Templ_emb(nn.Module):
         #dev_m = self.emb.weight.device
         #dev_t = pair.device
 
-        templ = self._get_templ_emb(t1d, t2d, pair.device)
-        rbf_feat = self._get_templ_rbf(xyz_t, mask_t, pair.device)
+        templ = self._get_templ_emb(t1d, t2d, strides['templ_emb'])
+        rbf_feat = self._get_templ_rbf(xyz_t, mask_t, strides['templ_emb'])
 
         # process each template pair feature
         templ = self.templ_stack(
-            templ, rbf_feat, t1d, use_checkpoint=use_checkpoint, p2p_crop=p2p_crop
+            templ, rbf_feat, t1d, strides,
+            use_checkpoint=use_checkpoint, p2p_crop=p2p_crop
         ).to(pair.dtype) # (B, T, L,L, d_templ)
 
         # Prepare 1D template torsion angle features
@@ -311,7 +294,7 @@ class Templ_emb(nn.Module):
             out = checkpoint.checkpoint(create_custom_forward(self.attn_tor), state, t1d, t1d)
             out = out.reshape(B, L, -1)
         else:
-            out = self.attn_tor(state, t1d, t1d).reshape(B, L, -1)
+            out = self.attn_tor(state, t1d, t1d, strides['templ_attn']).reshape(B, L, -1)
         state = state.reshape(B, L, -1)
         state = state + out
 
@@ -322,7 +305,7 @@ class Templ_emb(nn.Module):
             out = checkpoint.checkpoint(create_custom_forward(self.attn), pair, templ, templ)
             out = out.reshape(B, L, L, -1)
         else:
-            out = self.attn(pair, templ, templ).reshape(B, L, L, -1)
+            out = self.attn(pair, templ, templ, strides['templ_attn']).reshape(B, L, L, -1)
         #
         pair = pair.reshape(B, L, L, -1)
         pair = pair + out
@@ -349,13 +332,9 @@ class Recycling(nn.Module):
         self.proj_dist = init_lecun_normal(self.proj_dist)
         nn.init.zeros_(self.proj_dist.bias)
 
-    #@profile
-    def forward(self, seq, msa, pair, state, xyz, mask_recycle=None, stride=256):
+    def forward(self, seq, msa, pair, state, xyz, stride, mask_recycle=None):
         B, L = msa.shape[:2]
         dtype = msa.dtype
-
-        dev_model = self.proj_dist.weight.device
-        dev_pair = pair.device
 
         # fd reduce memory in inference
         STRIDE = L
@@ -369,31 +348,31 @@ class Recycling(nn.Module):
             msa_i = msa[:,rows]
             msa[:,rows] = self.norm_msa(msa_i).to(dtype)
 
-            pair_i = pair[:,rows].to(dev_model)
-            pair[:,rows] = self.norm_pair(pair_i).to(dev_pair,dtype)
+            pair_i = pair[:,rows]
+            pair[:,rows] = self.norm_pair(pair_i).to(dtype)
 
         ## SYMM
-        left = state.to(dev_pair,dtype).unsqueeze(2).expand(-1,-1,L,-1)
-        right = state.to(dev_pair,dtype).unsqueeze(1).expand(-1,L,-1,-1)
+        left = state.to(dtype).unsqueeze(2).expand(-1,-1,L,-1)
+        right = state.to(dtype).unsqueeze(1).expand(-1,L,-1,-1)
 
         # recreate Cb given N,Ca,C
         Cb = get_Cb(xyz[:,:,:3])
 
-        dist_CB = torch.zeros((B,L,L,self.d_rbf), device=dev_pair, dtype=left.dtype)
+        dist_CB = torch.zeros((B,L,L,self.d_rbf), device=msa.device, dtype=dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
             dist_CB[:,rows] = rbf(
                 torch.cdist(Cb[:,rows], Cb)
-            ).to(dev_pair,dtype)
+            ).to(dtype)
 
         if mask_recycle != None:
-            dist_CB = mask_recycle[...,None].to(dev_pair,dtype)*dist_CB
+            dist_CB = mask_recycle[...,None].to(dtype)*dist_CB
 
         dist_CB = torch.cat((dist_CB, left, right), dim=-1)
 
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            pair[:,rows] += self.proj_dist(dist_CB[:,rows].to(dev_model)).to(dev_pair)
+            pair[:,rows] += self.proj_dist(dist_CB[:,rows])
 
         return msa, pair, state
 

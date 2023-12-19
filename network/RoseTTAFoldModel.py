@@ -55,7 +55,7 @@ class RoseTTAFoldModule(nn.Module):
                 return_raw=False, return_full=False,
                 use_checkpoint=False, p2p_crop=-1, topk_crop=-1,
                 symmids=None, symmsub=None, symmRs=None, symmmeta=None,
-                low_vram=False):
+                striping=None, low_vram=False):
         if symmids is None:
             symmids = torch.tensor([[0]], device=xyz.device) # C1
         oligo = symmids.shape[0]
@@ -65,13 +65,9 @@ class RoseTTAFoldModule(nn.Module):
 
         # model and pair device
         dev_model = self.latent_emb.emb.weight.device
-        if (low_vram):
-            dev_pair = torch.device('cpu')
-        else:
-            dev_pair = dev_model
 
         # Get embeddings
-        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx)#, dev_pair=dev_pair)
+        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, stride=striping['msa_emb'])
         msa_latent, pair, state = (
           msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
         )
@@ -84,10 +80,13 @@ class RoseTTAFoldModule(nn.Module):
             msa_prev = torch.zeros_like(msa_latent[:,0])
             pair_prev = torch.zeros_like(pair)
             state_prev = torch.zeros_like(state)
+        else:
+            msa_prev = msa_prev.to(msa_latent.device)
+            pair_prev = pair_prev.to(pair.device)
 
         msa_recycle, pair_recycle, state_recycle = self.recycle(
-          seq, msa_prev, pair_prev, state_prev, xyz, mask_recycle)
-        msa_recycle, pair_recycle = msa_recycle.to(dtype), pair_recycle.to(dev_pair, dtype)
+          seq, msa_prev, pair_prev, state_prev, xyz, striping['recycl'], mask_recycle)
+        msa_recycle, pair_recycle = msa_recycle.to(dtype), pair_recycle.to(dtype)
 
         msa_latent[:,0] = msa_latent[:,0] + msa_recycle
         pair = pair + pair_recycle
@@ -99,9 +98,8 @@ class RoseTTAFoldModule(nn.Module):
 
         #
         # add template embedding
-        #print ('templ_emb')
         pair, state = self.templ_emb(
-          t1d, t2d, alpha_t, xyz_t, mask_t, pair, state,
+          t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, strides=striping,
           use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, symmids=symmids
         )
 
@@ -109,10 +107,15 @@ class RoseTTAFoldModule(nn.Module):
         t1d, t2d, alpha_t, xyz_t, mask_t = None, None, None, None, None
 
         # Predict coordinates from given inputs
-        #print ('simulator')
+        #from memory import mem_report
+        #print ('===A===')
+        #mem_report()
+
         msa, pair, R, T, alpha, state, symmsub = self.simulator(
-            seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, symmids, symmsub, symmRs, symmmeta,
+            seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, 
+            striping, symmids, symmsub, symmRs, symmmeta,
             use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, topk_crop=topk_crop, 
+            low_vram=low_vram
         )
 
         if return_raw:
@@ -131,11 +134,6 @@ class RoseTTAFoldModule(nn.Module):
         logits_pae = self.pae_pred(pair)
         # predict bind/no-bind
         p_bind = self.bind_pred(logits_pae,same_chain)
-
-        pair, same_chain, logits_pae, p_bind = (
-            pair.to(dev_pair), same_chain.to(dev_pair), 
-            logits_pae.to(dev_pair), p_bind
-        )
 
         # Predict LDDT
         lddt = self.lddt_pred(state)

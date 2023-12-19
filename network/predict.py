@@ -48,8 +48,9 @@ def get_args():
     return args
 
 MODEL_PARAM ={
-        "n_extra_block": 4,
-        "n_main_block": 36,
+        "n_extra_block"   : 4,
+        "n_main_block"    : 4, #36,
+        "n_ref_block"     : 4,
         "d_msa"           : 256 ,
         "d_pair"          : 128,
         "d_templ"         : 64,
@@ -88,6 +89,36 @@ SE3_param_topk = {
         }
 MODEL_PARAM['SE3_param_full'] = SE3_param_full
 MODEL_PARAM['SE3_param_topk'] = SE3_param_topk
+
+def get_striping_parameters(low_vram=False):
+    stripe = {
+        "msa2msa":1024,
+        "msa2pair":1024,
+        "pair2pair":1024,
+        "str2str":1024,
+        "iter":1024,
+        "ff_m2m":1024,
+        "ff_p2p":1024,
+        "ff_s2s":1024,
+        "attn":1024,
+        "msarow_n":1024,
+        "msarow_l":1024,
+        "msacol":1024,
+        "biasedax":512,
+        "trimult":1024,
+        "recycl":1024,
+        "msa_emb":1024,
+        "templ_emb":1024,
+        "templ_pair":1024,
+        "templ_attn":1024,
+    }
+
+    # adjust for low vram
+    if (low_vram):
+        stripe['trimult'] = 128
+        stripe['biasedax'] = 64
+
+    return stripe
 
 def pae_unbin(pred_pae):
     # calculate pae loss
@@ -187,6 +218,15 @@ class Predictor():
             return False
         checkpoint = torch.load(model_weights, map_location=self.device)
         self.model.load_state_dict(checkpoint['model_state_dict'],strict=False)
+        for m_i in self.model.simulator.extra_block:
+            m_i.pair2pair = m_i.pair2pair.half()
+            m_i.msa2msa = m_i.msa2msa.half()
+            m_i.msa2pair = m_i.msa2pair.half()
+        for m_i in self.model.simulator.main_block:
+            m_i.pair2pair = m_i.pair2pair.half()
+            m_i.msa2msa = m_i.msa2msa.half()
+            m_i.msa2pair = m_i.msa2pair.half()
+
         return True
 
     def predict(
@@ -374,13 +414,10 @@ class Predictor():
         n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram, out_prefix,
         msa_mask=0.0,
     ):
-        if low_vram:
-            dev_pair = torch.device("cpu")
-        else:
-            dev_pair = self.device
-
         self.xyz_converter = self.xyz_converter.to(self.device)
         self.lddt_bins = self.lddt_bins.to(self.device)
+
+        STRIPE = get_striping_parameters(low_vram)
 
         with torch.no_grad():
             msa = msa_orig.long().to(self.device) # (N, L)
@@ -395,7 +432,7 @@ class Predictor():
             B = 1
             #
             t1d = t1d.to(self.device).half()
-            t2d = t2d.to(dev_pair).half()
+            t2d = t2d.to(self.device).half()
             idx_pdb = idx_pdb.to(self.device)
             xyz_t = xyz_t.to(self.device)
             mask_t = mask_t.to(self.device)
@@ -453,13 +490,16 @@ class Predictor():
                                                                symmids=symmids,
                                                                symmsub=symmsub,
                                                                symmRs=symmRs,
-                                                               symmmeta=symmmeta,
-                                                               low_vram=low_vram )
+                                                               symmmeta=symmmeta, 
+                                                               striping=STRIPE )
 
                     alpha = alpha[-1].to(seq.device)
                     xyz_prev = xyz_prev[-1].to(seq.device)
                     _, xyz_prev = self.xyz_converter.compute_all_atom(seq, xyz_prev, alpha)
                     mask_recycle=None
+
+                pair_prev = pair_prev.cpu()
+                msa_prev = msa_prev.cpu()
 
                 pred_lddt = nn.Softmax(dim=1)(pred_lddt.float()) * self.lddt_bins[None,:,None]
                 pred_lddt = pred_lddt.sum(dim=1)
@@ -523,17 +563,17 @@ class Predictor():
                 Lstartj += lj
             Lstarti += li
 
-        with open("%s.json"%(out_prefix), "w") as outfile:
-            json.dump(outdata, outfile, indent=4)
+        #with open("%s.json"%(out_prefix), "w") as outfile:
+        #    json.dump(outdata, outfile, indent=4)
 
-        util.writepdb("%s_pred.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
+        #util.writepdb("%s_pred.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
         #util.writepdb("%s_pred_last.pdb"%(out_prefix), last_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
 
-        prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
-        np.savez_compressed("%s.npz"%(out_prefix),
-            dist=prob_s[0].astype(np.float16),
-            lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
-            pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
+        #prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
+        #np.savez_compressed("%s.npz"%(out_prefix),
+        #    dist=prob_s[0].astype(np.float16),
+        #    lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
+        #    pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
 
         #torch.save({'seq':seq_full[0], 'xyz':best_xyzfull[0], 'chainlens':L_s}, "%s.pt"%(out_prefix))
 

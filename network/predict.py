@@ -532,6 +532,7 @@ class Predictor():
                 best_lddt = pred_lddt.half().cpu()
                 best_pae = logits_pae.half().cpu()
                 best_logit = [l.half().cpu() for l in logit_s]
+                pred_lddt, logits_pae, logit_s = None, None, None
 
             # free more memory
             pair_prev, msa_prev, t2d = None, None, None

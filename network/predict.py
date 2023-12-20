@@ -397,7 +397,6 @@ class Predictor():
         mask_t_2d = mask_t[:,:,:,:3].all(dim=-1) # (B, T, L)
         mask_t_2d = mask_t_2d[:,:,None]*mask_t_2d[:,:,:,None] # (B, T, L, L)
         mask_t_2d = mask_t_2d.float()*same_chain.float()[:,None] # (ignore inter-chain region)
-        t2d = xyz_to_t2d(xyz_t, mask_t_2d)
 
         if is_training:
             self.model.train()
@@ -410,7 +409,7 @@ class Predictor():
             start_time = time.time()
             self.run_prediction(
                 msa_orig, ins_orig, 
-                t1d, t2d, xyz_t[:,:,:,1], alpha_t, mask_t_2d, 
+                t1d, xyz_t, alpha_t, mask_t_2d, 
                 xyz_prev, mask_prev, same_chain, idx_pdb,
                 symmids, symmsub, symmRs, symmmeta,  Ls, 
                 n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram,
@@ -424,7 +423,7 @@ class Predictor():
 
     def run_prediction(
         self, msa_orig, ins_orig, 
-        t1d, t2d, xyz_t, alpha_t, mask_t, 
+        t1d, xyz_t, alpha_t, mask_t, 
         xyz_prev, mask_prev, same_chain, idx_pdb, 
         symmids, symmsub, symmRs, symmmeta, L_s, 
         n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram, out_prefix,
@@ -448,11 +447,11 @@ class Predictor():
             B = 1
             #
             t1d = t1d.to(self.device).half()
-            t2d = t2d.half()
+            t2d = xyz_to_t2d(xyz_t, mask_t).half()
             if not low_vram:
                 t2d = t2d.to(self.device) #.half()
             idx_pdb = idx_pdb.to(self.device)
-            xyz_t = xyz_t.to(self.device)
+            xyz_t = xyz_t[:,:,:,1].to(self.device)
             mask_t = mask_t.to(self.device)
             alpha_t = alpha_t.to(self.device)
             xyz_prev = xyz_prev.to(self.device)
@@ -486,11 +485,11 @@ class Predictor():
                 msa_seed = msa_seed.unsqueeze(0)
                 msa_extra = msa_extra.unsqueeze(0)
 
-                with torch.cuda.amp.autocast(True):
-                    #fd memory savings
-                    msa_seed = msa_seed.half()  # GPU ONLY
-                    msa_extra = msa_extra.half()  # GPU ONLY
+                #fd memory savings
+                msa_seed = msa_seed.half()  # GPU ONLY
+                msa_extra = msa_extra.half()  # GPU ONLY
 
+                with torch.cuda.amp.autocast(True):
                     logit_s, _, _, logits_pae, p_bind, xyz_prev, alpha, symmsub, pred_lddt, msa_prev, pair_prev, state_prev = self.model(
                                                                msa_seed, msa_extra,
                                                                seq, xyz_prev, 
@@ -509,34 +508,30 @@ class Predictor():
                                                                symmRs=symmRs,
                                                                symmmeta=symmmeta, 
                                                                striping=STRIPE )
-
                     alpha = alpha[-1].to(seq.device)
                     xyz_prev = xyz_prev[-1].to(seq.device)
                     _, xyz_prev = self.xyz_converter.compute_all_atom(seq, xyz_prev, alpha)
-                    mask_recycle=None
 
+                mask_recycle=None
                 pair_prev = pair_prev.cpu()
                 msa_prev = msa_prev.cpu()
 
-                pred_lddt = nn.Softmax(dim=1)(pred_lddt.float()) * self.lddt_bins[None,:,None]
+                pred_lddt = nn.Softmax(dim=1)(pred_lddt.half()) * self.lddt_bins[None,:,None]
                 pred_lddt = pred_lddt.sum(dim=1)
-                pae = pae_unbin(logits_pae.float())
-                print (f"recycle={i_cycle} plddt={pred_lddt.mean():.3f} pae={pae.mean():.3f}")
+                logits_pae = pae_unbin(logits_pae.half())
 
-                #util.writepdb("%s_cycle_%02d.pdb"%(out_prefix, i_cycle), xyz_prev[0], seq[0], L_s, bfacts=100*pred_lddt[0])
-
-                logits_pae = None
+                print (f"recycle={i_cycle} plddt={pred_lddt.mean():.3f} pae={logits_pae.mean():.3f}")
 
                 torch.cuda.empty_cache()
                 if pred_lddt.mean() < best_lddt.mean():
+                    pred_lddt, logits_pae, logit_s = None, None, None
                     continue
 
                 best_xyz = xyz_prev
                 best_logit = logit_s
-                best_lddt = pred_lddt.half()
-                best_pae = pae.half()
-                best_xyz, best_lddt, best_pae = best_xyz.cpu(), best_lddt.cpu(), best_pae.cpu()
-                best_logit = [l.half().cpu() for l in best_logit]
+                best_lddt = pred_lddt.half().cpu()
+                best_pae = logits_pae.half().cpu()
+                best_logit = [l.half().cpu() for l in logit_s]
 
             # free more memory
             pair_prev, msa_prev, t2d = None, None, None

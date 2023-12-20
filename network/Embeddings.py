@@ -35,7 +35,7 @@ class PositionalEncoding2D(nn.Module):
         if (not self.training and stride>0):
             STRIDE = stride
 
-        emb = torch.zeros((B,L,L,self.d_out), device=idx.device)
+        emb = torch.zeros((B,L,L,self.d_out), device=idx.device, dtype=self.emb.weight.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=idx.device)[:,None]
             for j in range((L-1)//STRIDE+1):

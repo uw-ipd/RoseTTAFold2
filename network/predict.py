@@ -238,6 +238,10 @@ class Predictor():
             m_i.pair2pair = m_i.pair2pair.half()
             m_i.msa2msa = m_i.msa2msa.half()
             m_i.msa2pair = m_i.msa2pair.half()
+        self.model.latent_emb = self.model.latent_emb.half()
+        self.model.full_emb = self.model.full_emb.half()
+        self.model.templ_emb = self.model.templ_emb.half()
+        self.model.recycle = self.model.recycle.half()
 
         return True
 
@@ -521,20 +525,21 @@ class Predictor():
 
                 #util.writepdb("%s_cycle_%02d.pdb"%(out_prefix, i_cycle), xyz_prev[0], seq[0], L_s, bfacts=100*pred_lddt[0])
 
-                logit_s = [l.cpu() for l in logit_s]
                 logits_pae = None
 
                 torch.cuda.empty_cache()
                 if pred_lddt.mean() < best_lddt.mean():
                     continue
-                
-                best_xyz = xyz_prev.float().cpu()
+
+                best_xyz = xyz_prev
                 best_logit = logit_s
-                best_lddt = pred_lddt.half().cpu()
-                best_pae = pae.half().cpu()
+                best_lddt = pred_lddt.half()
+                best_pae = pae.half()
+                best_xyz, best_lddt, best_pae = best_xyz.cpu(), best_lddt.cpu(), best_pae.cpu()
+                best_logit = [l.half().cpu() for l in best_logit]
 
             # free more memory
-            t2d = None
+            pair_prev, msa_prev, t2d = None, None, None
 
             prob_s = list()
             for logit in best_logit:

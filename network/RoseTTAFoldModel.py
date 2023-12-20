@@ -110,8 +110,6 @@ class RoseTTAFoldModule(nn.Module):
             use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, topk_crop=topk_crop, 
             low_vram=low_vram
         )
-        #msa = msa_latent
-        #R, T, alpha = torch.zeros((8,B,L,3,3),device=msa.device), torch.zeros((8,B,L,3),device=msa.device), torch.zeros((8,B,L,10,2),device=msa.device)
 
         if return_raw:
             # get last structure
@@ -120,27 +118,21 @@ class RoseTTAFoldModule(nn.Module):
 
         # predict masked amino acids
         logits_aa = self.aa_pred(msa)
-        #logits_aa = None
 
         # predict distogram & orientograms
         logits = self.c6d_pred(pair)
-        #logits = None
 
         # predict PAE
         logits_pae = self.pae_pred(pair)
-        #logits_pae = None
 
         # predict bind/no-bind
         p_bind = self.bind_pred(logits_pae,same_chain)
-        #p_bind = None
 
         # Predict LDDT
         lddt = self.lddt_pred(state)
-        #lddt = None
 
         # predict experimentally resolved or not
         logits_exp = self.exp_pred(msa[:,0], state)
-        #logits_exp = None
 
         # get all intermediate bb structures
         xyz = einsum('rblij,blaj->rblai', R, xyz-xyz[:,:,1].unsqueeze(-2)) + T.unsqueeze(-2)

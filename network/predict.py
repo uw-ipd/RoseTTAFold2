@@ -40,7 +40,7 @@ def get_args():
     parser.add_argument("-n_recycles", default=3, type=int, help="Number of recycles to use [3].")
     parser.add_argument("-n_models", default=1, type=int, help="Number of models to predict [1].")
     parser.add_argument("-subcrop", default=-1, type=int, help="Subcrop pair-to-pair updates. A value of -1 means no subcropping. [-1]")
-    parser.add_argument("-topk", default=1548, type=int, help="Limit number of residue-pair neighbors in structure updates. A value of -1 means no subcropping. [2048]")
+    parser.add_argument("-topk", default=1536, type=int, help="Limit number of residue-pair neighbors in structure updates. A value of -1 means no subcropping. [2048]")
     parser.add_argument("-low_vram", default=False, help="Offload some computations to CPU to allow larger systems in low VRAM. [False]", action='store_true')
     parser.add_argument("-nseqs", default=256, type=int, help="The number of MSA sequences to sample in the main 1D track [256].")
     parser.add_argument("-nseqs_full", default=2048, type=int, help="The number of MSA sequences to sample in the wide-MSA 1D track [2048].")
@@ -105,7 +105,7 @@ def get_striping_parameters(low_vram=False):
         "msarow_l":1024,
         "msacol":1024,
         "biasedax":512,
-        "trimult":1024,
+        "trimult":512,
         "recycl":1024,
         "msa_emb":1024,
         "templ_emb":1024,
@@ -115,8 +115,20 @@ def get_striping_parameters(low_vram=False):
 
     # adjust for low vram
     if (low_vram):
+        # msa2msa
+        stripe['msa2msa'] = 256
+        stripe['msarow_n'] = 256
+        stripe['msarow_l'] = 256
+        stripe['msacol'] = 256
+        stripe['ff_m2m'] = 256
+
+        # pair2pair
+        stripe['pair2pair'] = 256
+        stripe['ff_p2p'] = 256
+        stripe['biasedax'] = 128
         stripe['trimult'] = 128
-        stripe['biasedax'] = 64
+
+        stripe['recycl'] = 512
 
     return stripe
 
@@ -432,7 +444,9 @@ class Predictor():
             B = 1
             #
             t1d = t1d.to(self.device).half()
-            t2d = t2d.to(self.device).half()
+            t2d = t2d.half()
+            if not low_vram:
+                t2d = t2d.to(self.device) #.half()
             idx_pdb = idx_pdb.to(self.device)
             xyz_t = xyz_t.to(self.device)
             mask_t = mask_t.to(self.device)
@@ -521,6 +535,7 @@ class Predictor():
                 best_aa = logit_aa_s
                 best_lddt = pred_lddt.cpu()
                 best_pae = pae.float().cpu()
+
 
             prob_s = list()
             for logit in best_logit:

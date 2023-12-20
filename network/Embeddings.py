@@ -225,7 +225,7 @@ class Templ_emb(nn.Module):
         left = t1d.unsqueeze(3).expand(-1,-1,-1,L,-1)
         right = t1d.unsqueeze(2).expand(-1,-1,L,-1,-1)
         #
-        templ = torch.cat((t2d, left, right), -1) # (B, T, L, L, 88)
+        templ = torch.cat((t2d.to(t1d.device), left, right), -1) # (B, T, L, L, 88)
         out = torch.zeros((B,T,L,L,self.d_templ), device=t1d.device, dtype=t2d.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
@@ -271,9 +271,6 @@ class Templ_emb(nn.Module):
         #   - state: query state features (B, L, d_state)
         B, T, L, _ = t1d.shape
 
-        #dev_m = self.emb.weight.device
-        #dev_t = pair.device
-
         templ = self._get_templ_emb(t1d, t2d, strides['templ_emb'])
         rbf_feat = self._get_templ_rbf(xyz_t, mask_t, strides['templ_emb'])
 
@@ -296,7 +293,7 @@ class Templ_emb(nn.Module):
         else:
             out = self.attn_tor(state, t1d, t1d, strides['templ_attn']).reshape(B, L, -1)
         state = state.reshape(B, L, -1)
-        state = state + out
+        state += out
 
         # mixing query pair features to template information (Template pointwise attention)
         pair = pair.reshape(B*L*L, 1, -1)
@@ -308,7 +305,7 @@ class Templ_emb(nn.Module):
             out = self.attn(pair, templ, templ, strides['templ_attn']).reshape(B, L, L, -1)
         #
         pair = pair.reshape(B, L, L, -1)
-        pair = pair + out
+        pair += out
 
         return pair, state
 

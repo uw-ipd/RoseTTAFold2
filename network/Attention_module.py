@@ -493,23 +493,17 @@ class TriangleMultiplication(nn.Module):
         if (not self.training and stride>0):
             STRIDE = stride
 
-        pairnorm = torch.zeros_like(pair)
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
-            pairnorm[:,rows] = self.norm(pair[:,rows]).to(dtype=pair.dtype)
-        pair = pairnorm
-
         out = torch.zeros((B,L,L,self.d_out), device=pair.device, dtype=pair.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
 
             if self.outgoing:
-                pair_i = pair[:,rows,:]
+                pair_i = self.norm(pair[:,rows,:]).to(dtype=pair.dtype)
                 left = self.left_proj(pair_i) # (B, L, L, d_h)
                 left_gate = torch.sigmoid(self.left_gate(pair_i))
                 left = left_gate * left
             else:
-                pair_i = pair[:,:,rows]
+                pair_i = self.norm(pair[:,:,rows]).to(dtype=pair.dtype)
                 left = self.left_proj(pair_i) # (B, L, L, d_h)
                 left_gate = torch.sigmoid(self.left_gate(pair_i))
                 left = left_gate * left
@@ -518,14 +512,14 @@ class TriangleMultiplication(nn.Module):
               cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=pair.device)
 
               if self.outgoing:
-                  pair_i = pair[:,cols,:]
+                  pair_i = self.norm(pair[:,cols,:]).to(dtype=pair.dtype)
                   right = self.right_proj(pair_i) # (B, L, L, d_h)
                   right_gate = torch.sigmoid(self.right_gate(pair_i))
                   right = right_gate * right
 
                   out_ij = einsum('bikd,bjkd->bijd', left, right/float(L))
               else:
-                  pair_i = pair[:,:,cols]
+                  pair_i = self.norm(pair[:,:,cols]).to(dtype=pair.dtype)
                   right = self.right_proj(pair_i) # (B, L, L, d_h)
                   right_gate = torch.sigmoid(self.right_gate(pair_i))
                   right = right_gate * right
@@ -535,7 +529,7 @@ class TriangleMultiplication(nn.Module):
               out_ij = self.norm_out(out_ij)
               out_ij = self.out_proj(out_ij)
 
-              pair_ij = pair[:,rows[:,None],cols[None,:]]
+              pair_ij = self.norm( pair[:,rows[:,None],cols[None,:]] ).to(dtype=pair.dtype)
               gate = torch.sigmoid(self.gate(pair_ij)) # (B, L, L, d_pair)
               out[:,rows[:,None],cols[None,:]] = (gate * out_ij)
 

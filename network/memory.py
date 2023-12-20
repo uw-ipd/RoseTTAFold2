@@ -53,7 +53,7 @@ def mem_report():
     print('%s\t%s\t\t\t%s' %('Element type', 'Size', 'Used MEM(MBytes)') )
     tensors = [obj for obj in objects if torch.is_tensor(obj)]
     cuda_tensors = [t for t in tensors if t.is_cuda]
-    host_tensors = [t for t in tensors if not t.is_cuda]
+    #host_tensors = [t for t in tensors if not t.is_cuda]
     _mem_report(cuda_tensors, 'GPU')
-    _mem_report(host_tensors, 'CPU')
+    #_mem_report(host_tensors, 'CPU')
     print('='*LEN)

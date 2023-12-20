@@ -206,7 +206,7 @@ class PairStr2Pair(nn.Module):
         if (not self.training and strides['pair2pair']>0):
             STRIDE = strides['pair2pair']
 
-        rbf_feat_out = torch.zeros((B,L,L,self.d_pair), device=pair.device)
+        rbf_feat_out = torch.zeros((B,L,L,self.d_pair), device=rbf_feat.device, dtype=rbf_feat.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
             for j in range((L-1)//STRIDE+1):
@@ -622,7 +622,7 @@ class IterBlock(nn.Module):
             STRIDE = strides['iter']
 
         xyzfull = xyz.view(1,B*L,3,3)
-        rbf_feat = torch.zeros((B,L,L,self.d_rbf), device=msa.device)
+        rbf_feat = torch.zeros((B,L,L,self.d_rbf), device=msa.device, dtype=msa.dtype)
         for i in range((L-1)//STRIDE+1):
             rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=msa.device)
             for j in range((L-1)//STRIDE+1):
@@ -631,7 +631,7 @@ class IterBlock(nn.Module):
                 rbf_feat_ij = (
                   rbf(torch.cdist(xyz[:,rows,1], xyz[:,cols,1])).reshape(B,NR,NC,-1)
                   + self.pos(idx[:,rows],idx[:,cols], B)
-                )
+                ).to(rbf_feat.dtype)
                 rbf_feat[:,rows[:,None],cols[None,:]] = rbf_feat_ij
 
         if use_checkpoint:

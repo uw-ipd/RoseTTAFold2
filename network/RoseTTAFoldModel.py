@@ -63,9 +63,6 @@ class RoseTTAFoldModule(nn.Module):
         B, N, L = msa_latent.shape[:3]
         dtype = msa_latent.dtype
 
-        # model and pair device
-        dev_model = self.latent_emb.emb.weight.device
-
         # Get embeddings
         msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, stride=striping['msa_emb'])
         msa_latent, pair, state = (
@@ -88,9 +85,9 @@ class RoseTTAFoldModule(nn.Module):
           seq, msa_prev, pair_prev, state_prev, xyz, striping['recycl'], mask_recycle)
         msa_recycle, pair_recycle = msa_recycle.to(dtype), pair_recycle.to(dtype)
 
-        msa_latent[:,0] = msa_latent[:,0] + msa_recycle
-        pair = pair + pair_recycle
-        state = state + state_recycle
+        msa_latent[:,0] += msa_recycle
+        pair += pair_recycle
+        state += state_recycle
 
         # free unused
         msa_prev, pair_prev, state_prev = None, None, None
@@ -107,16 +104,14 @@ class RoseTTAFoldModule(nn.Module):
         t1d, t2d, alpha_t, xyz_t, mask_t = None, None, None, None, None
 
         # Predict coordinates from given inputs
-        #from memory import mem_report
-        #print ('===A===')
-        #mem_report()
-
         msa, pair, R, T, alpha, state, symmsub = self.simulator(
             seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, 
             striping, symmids, symmsub, symmRs, symmmeta,
             use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, topk_crop=topk_crop, 
             low_vram=low_vram
         )
+        #msa = msa_latent
+        #R, T, alpha = torch.zeros((8,B,L,3,3),device=msa.device), torch.zeros((8,B,L,3),device=msa.device), torch.zeros((8,B,L,10,2),device=msa.device)
 
         if return_raw:
             # get last structure
@@ -125,21 +120,27 @@ class RoseTTAFoldModule(nn.Module):
 
         # predict masked amino acids
         logits_aa = self.aa_pred(msa)
-
-        pair,same_chain = pair.to(dev_model), same_chain.to(dev_model)
+        #logits_aa = None
 
         # predict distogram & orientograms
         logits = self.c6d_pred(pair)
+        #logits = None
+
         # predict PAE
         logits_pae = self.pae_pred(pair)
+        #logits_pae = None
+
         # predict bind/no-bind
         p_bind = self.bind_pred(logits_pae,same_chain)
+        #p_bind = None
 
         # Predict LDDT
         lddt = self.lddt_pred(state)
+        #lddt = None
 
         # predict experimentally resolved or not
         logits_exp = self.exp_pred(msa[:,0], state)
+        #logits_exp = None
 
         # get all intermediate bb structures
         xyz = einsum('rblij,blaj->rblai', R, xyz-xyz[:,:,1].unsqueeze(-2)) + T.unsqueeze(-2)

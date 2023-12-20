@@ -522,7 +522,6 @@ class Predictor():
                 #util.writepdb("%s_cycle_%02d.pdb"%(out_prefix, i_cycle), xyz_prev[0], seq[0], L_s, bfacts=100*pred_lddt[0])
 
                 logit_s = [l.cpu() for l in logit_s]
-                logit_aa_s = [l.cpu() for l in logit_aa_s]
                 logits_pae = None
 
                 torch.cuda.empty_cache()
@@ -534,14 +533,13 @@ class Predictor():
                 best_lddt = pred_lddt.half().cpu()
                 best_pae = pae.half().cpu()
 
+            # free more memory
+            t2d = None
 
             prob_s = list()
             for logit in best_logit:
-                prob = self.active_fn(logit.float()) # distogram
-                prob_s.append(prob)
-
-        # free more memory
-        t2d = None
+                prob = self.active_fn(logit.to(self.device).float()) # distogram
+                prob_s.append(prob.half().cpu())
 
         # full complex
         xyz_prev = xyz_prev.float().cpu()

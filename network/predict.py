@@ -472,7 +472,6 @@ class Predictor():
             best_lddt = torch.tensor([-1.0], device=self.device)
             best_xyz = None
             best_logit = None
-            best_aa = None
             best_pae = None
 
             for i_cycle in range(n_recycles + 1):
@@ -488,7 +487,7 @@ class Predictor():
                     msa_seed = msa_seed.half()  # GPU ONLY
                     msa_extra = msa_extra.half()  # GPU ONLY
 
-                    logit_s, logit_aa_s, _, logits_pae, p_bind, xyz_prev, alpha, symmsub, pred_lddt, msa_prev, pair_prev, state_prev = self.model(
+                    logit_s, _, _, logits_pae, p_bind, xyz_prev, alpha, symmsub, pred_lddt, msa_prev, pair_prev, state_prev = self.model(
                                                                msa_seed, msa_extra,
                                                                seq, xyz_prev, 
                                                                idx_pdb,
@@ -532,15 +531,17 @@ class Predictor():
                 
                 best_xyz = xyz_prev.float().cpu()
                 best_logit = logit_s
-                best_aa = logit_aa_s
-                best_lddt = pred_lddt.cpu()
-                best_pae = pae.float().cpu()
+                best_lddt = pred_lddt.half().cpu()
+                best_pae = pae.half().cpu()
 
 
             prob_s = list()
             for logit in best_logit:
                 prob = self.active_fn(logit.float()) # distogram
                 prob_s.append(prob)
+
+        # free more memory
+        t2d = None
 
         # full complex
         xyz_prev = xyz_prev.float().cpu()
@@ -562,9 +563,6 @@ class Predictor():
         outdata = {}
 
         # RMS
-        #monomer_rms, complex_rms, best_xyzfull = calc_symm_rmsd(best_xyzfull, native, O)
-        #outdata['monomer_rms'] = monomer_rms.item()
-        #outdata['complex_rms'] = complex_rms.item()
         outdata['mean_plddt'] = best_lddt.mean().item()
         Lstarti = 0
         for i,li in enumerate(L_s):
@@ -578,12 +576,7 @@ class Predictor():
                 Lstartj += lj
             Lstarti += li
 
-        #with open("%s.json"%(out_prefix), "w") as outfile:
-        #    json.dump(outdata, outfile, indent=4)
-        #torch.save({'seq':seq_full[0], 'xyz':best_xyzfull[0], 'chainlens':L_s}, "%s.pt"%(out_prefix))
-
         util.writepdb("%s_pred.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
-        #util.writepdb("%s_pred_last.pdb"%(out_prefix), last_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
 
         prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
         np.savez_compressed("%s.npz"%(out_prefix),

@@ -284,7 +284,7 @@ def parse_templates_raw(ffdb, hhr_fn, atab_fn, templ_to_use, max_templ=20):
     for data in hits:
         if len(data)<7:
             continue
-        print ("Process %s..."%data[0])
+        #print ("Process %s..."%data[0])
         
         qi,ti = np.array(data[1]).T
         _,sel1,sel2 = np.intersect1d(ti, data[5], return_indices=True)
@@ -302,9 +302,9 @@ def parse_templates_raw(ffdb, hhr_fn, atab_fn, templ_to_use, max_templ=20):
     
     xyz = np.vstack(xyz).astype(np.float32)
     mask = np.vstack(mask).astype(np.float32)
-    qmap = np.vstack(qmap).astype(np.long)
+    qmap = np.vstack(qmap).astype(np.int_)
     f1d = np.vstack(f1d).astype(np.float32)
-    seq = np.hstack(seq).astype(np.long)
+    seq = np.hstack(seq).astype(np.int_)
     ids = ids
 
     return torch.from_numpy(xyz), torch.from_numpy(mask), torch.from_numpy(qmap), \

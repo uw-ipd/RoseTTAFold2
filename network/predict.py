@@ -18,12 +18,14 @@ from data_loader import merge_a3m_hetero
 import json
 import random
 
+from loss import calc_rmsd
+
 # suppress dgl warning w/ newest pytorch
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 
 def get_args():
-    default_model = os.path.dirname(__file__)+"/weights/RF2_apr23.pt"
+    default_model = os.path.dirname(__file__)+"/weights/RF2_jan24.pt"
 
     import argparse
     parser = argparse.ArgumentParser(description="RoseTTAFold2NA")
@@ -261,37 +263,40 @@ class Predictor():
         Ls_blocked, Ls, msas, inss = [], [], [], []
         for i,seq_i in enumerate(inputs):
             fseq_i =  seq_i.split(':')
-            fseq_ii =  seq_i.split('[')
-            a3m_i = fseq_ii[0]
+            a3m_i = fseq_i[0]
+
+            a3m_i =  a3m_i.split('[')
+            a3m_range = None
+            if (len(a3m_i)>1):
+              assert a3m_i[1][-1] == ']'
+              a3m_range = to_ranges(a3m_i[1][:-1])
+            a3m_i = a3m_i[0]
+
             msa_i, ins_i, Ls_i = parse_a3m(a3m_i)
             msa_i = torch.tensor(msa_i).long()
             ins_i = torch.tensor(ins_i).long()
             if (msa_i.shape[0] > nseqs_full):
                 idxs_tokeep = np.random.permutation(msa_i.shape[0])[:nseqs_full]
-                idxs_tokeep[0] = 0  # keep self
+                idxs_tokeep[0] = 0  # keep best
                 msa_i = msa_i[idxs_tokeep]
                 ins_i = ins_i[idxs_tokeep]
 
-            if (len(fseq_ii)==2):
-                if fseq_ii[1][-1] == ']':
-                    fseq_ii[1] = fseq_ii[1][:-1] # trim trailing ']'
-                ranges = to_ranges(fseq_ii[1])
+            if (a3m_range is not None):
+                a3m_mask = torch.zeros(sum(Ls_i), dtype=torch.bool)
 
-                maskres = torch.zeros(msa_i.shape[1],dtype=torch.bool)
-                for r in ranges:
-                    if (len(r))>1:
-                        rstart,rstop = r[0]-1, r[1]
+                Ls_new = []
+                for i in a3m_range:
+                    if len(i) == 1:
+                        a3m_mask[i[0]-1] = True
+                        Ls_new.append(1)
                     else:
-                        rstart,rstop = r[0]-1, r[0]
-                    maskres[rstart:rstop] = True
+                        a3m_mask[(i[0]-1):i[1]] = True
+                        Ls_new.append(i[1]-i[0]+1)
 
-                msa_i = msa_i[:,maskres]
-                ins_i = ins_i[:,maskres]
+                msa_i = msa_i[:,a3m_mask]
+                ins_i = ins_i[:,a3m_mask]
+                start_i = 0
 
-                Ls_new, L_start = [], 0
-                for L_i in Ls_i:
-                    Ls_new.append( torch.sum(maskres[L_start:(L_start+L_i)]) )
-                    L_start += L_i
                 Ls_i = Ls_new
 
             msas.append(msa_i)
@@ -335,6 +340,7 @@ class Predictor():
                 xyz_t[:ntmpl_i,startres:stopres,:,:] = xyz_t_i
                 t1d[:ntmpl_i,startres:stopres,:] = t1d_i
                 mask_t[:ntmpl_i,startres:stopres,:] = mask_t_i
+
             elif (len(fseq_i) == 2):
                 templ_fn = fseq_i[1]
                 startres,stopres = sum(Ls_blocked[:i]), sum(Ls_blocked[:(i+1)])
@@ -489,6 +495,8 @@ class Predictor():
                 msa_seed = msa_seed.half()  # GPU ONLY
                 msa_extra = msa_extra.half()  # GPU ONLY
 
+                xyz_prev_prev = xyz_prev.clone()
+
                 with torch.cuda.amp.autocast(True):
                     logit_s, _, _, logits_pae, p_bind, xyz_prev, alpha, symmsub, pred_lddt, msa_prev, pair_prev, state_prev = self.model(
                                                                msa_seed, msa_extra,
@@ -520,7 +528,9 @@ class Predictor():
                 pred_lddt = pred_lddt.sum(dim=1)
                 logits_pae = pae_unbin(logits_pae.half())
 
-                print (f"recycle={i_cycle} plddt={pred_lddt.mean():.3f} pae={logits_pae.mean():.3f}")
+                rmsd,_,_,_ = calc_rmsd(xyz_prev_prev[None].float(), xyz_prev.float(), torch.ones((1,L,27),dtype=torch.bool))
+
+                print (f"recycle {i_cycle} plddt {pred_lddt.mean():.3f} pae {logits_pae.mean():.3f} rmsd {rmsd[0]:.3f}")
 
                 torch.cuda.empty_cache()
                 if pred_lddt.mean() < best_lddt.mean():

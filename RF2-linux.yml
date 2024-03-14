@@ -7,8 +7,11 @@ channels:
 dependencies:
   - python=3.10
   - pip
-  - pytorch
-  - pytorch-cuda=11.7
+  - pytorch=2.0.1
+  - pytorch-cuda=11.8
   - dglteam/label/cu117::dgl
   - pyg::pyg
   - bioconda::hhsuite
+  - pandas=2.2.0
+  - torchdata=0.7.1
+  - pydantic

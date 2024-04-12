@@ -1,4 +1,4 @@
-# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Permission is hereby granted, free of charge, to any person obtaining a
 # copy of this software and associated documentation files (the "Software"),
@@ -18,14 +18,18 @@
 # FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 # DEALINGS IN THE SOFTWARE.
 #
-# SPDX-FileCopyrightText: Copyright (c) 2021 NVIDIA CORPORATION & AFFILIATES
+# SPDX-FileCopyrightText: Copyright (c) 2021-2022 NVIDIA CORPORATION & AFFILIATES
 # SPDX-License-Identifier: MIT
 
 import torch
 
 from se3_transformer.model import SE3Transformer
 from se3_transformer.model.fiber import Fiber
-from tests.utils import get_random_graph, assign_relative_pos, get_max_diff, rot
+
+if __package__ is None or __package__ == '':
+  from utils import get_random_graph, assign_relative_pos, get_max_diff, rot
+else:
+  from .utils import get_random_graph, assign_relative_pos, get_max_diff, rot
 
 # Tolerances for equivariance error abs( f(x) @ R  -  f(x @ R) )
 TOL = 1e-3

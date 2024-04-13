@@ -27,7 +27,7 @@ torch.backends.cudnn.deterministic = True
 
 USE_AMP = False
 
-N_PRINT_TRAIN = 8
+N_PRINT_TRAIN = 1
 #BATCH_SIZE = 1 * torch.cuda.device_count()
 
 # num structs per epoch
@@ -328,18 +328,6 @@ class Trainer():
 
         loss_s.append(torch.stack((blen_loss, bang_loss, lj_loss, hb_loss)).detach())
 
-        #if pred_prev_s != None:
-        #    lddt_s = list()
-        #    for pred_prev in pred_prev_s:
-        #        prev_lddt = calc_allatom_lddt(pred_prev[0,:,:14,:3], nat_symm[:,:14,:3], xs_mask[0,:,:14],
-        #                                      idx[0], same_chain[0], negative=negative)
-        #        lddt_s.append(prev_lddt.detach())
-        #    lddt_s.append(true_lddt.detach())
-        #    lddt_s = torch.stack(lddt_s) 
-        #    return tot_loss, lddt_s, torch.cat(loss_s, dim=0)
-        #else:
-        #    return tot_loss, true_lddt.detach(), torch.cat(loss_s, dim=0)
-
         # fd - for symmetry, ignore this for now (need to symmetrically resolve pred_prev_s)
         return tot_loss, true_lddt.detach(), torch.cat(loss_s, dim=0)
 
@@ -384,20 +372,6 @@ class Trainer():
         map_location = {"cuda:%d"%0: "cuda:%d"%rank}
         checkpoint = torch.load(chk_fn, map_location=map_location)
         rename_model = False
-        #new_chk = {}
-        #for param in model.module.model.state_dict():
-        #    if param not in checkpoint['model_state_dict']:
-        #        print ('missing',param)
-        #        rename_model=True
-        #    elif (checkpoint['model_state_dict'][param].shape == model.module.model.state_dict()[param].shape):
-        #        new_chk[param] = checkpoint['model_state_dict'][param]
-        #    else:
-        #        print (
-        #            'wrong size',param,
-        #            checkpoint['model_state_dict'][param].shape,
-        #             model.module.model.state_dict()[param].shape )
-
-        #model.module.model.load_state_dict(checkpoint['final_state_dict'], strict=False)
         model.module.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model.module.shadow.load_state_dict(checkpoint['model_state_dict'], strict=False)
         if resume_train and (not rename_model):
@@ -527,13 +501,14 @@ class Trainer():
             DDP_cleanup()
             return
         
-        valid_pdb_sampler.set_epoch(0)
+        #valid_pdb_sampler.set_epoch(0)
         #valid_homo_sampler.set_epoch(0)
         #valid_compl_sampler.set_epoch(0)
         #valid_neg_sampler.set_epoch(0)
         #valid_tot, valid_loss, valid_acc = self.valid_pdb_cycle(ddp_model, valid_pdb_loader, rank, gpu, world_size, loaded_epoch)
-        _, _, _ = self.valid_pdb_cycle(ddp_model, valid_homo_loader, rank, gpu, world_size, loaded_epoch, header="Homo")
+        #_, _, _ = self.valid_pdb_cycle(ddp_model, valid_homo_loader, rank, gpu, world_size, loaded_epoch, header="Homo")
         #_, _, _ = self.valid_ppi_cycle(ddp_model, valid_compl_loader, valid_neg_loader, rank, gpu, world_size, loaded_epoch)
+
         for epoch in range(loaded_epoch+1, self.n_epoch):
             train_sampler.set_epoch(epoch)
             valid_pdb_sampler.set_epoch(epoch)
@@ -544,7 +519,7 @@ class Trainer():
             train_tot, train_loss, train_acc = self.train_cycle(ddp_model, train_loader, optimizer, scheduler, scaler, rank, gpu, world_size, epoch)
             valid_tot, valid_loss, valid_acc = self.valid_pdb_cycle(ddp_model, valid_pdb_loader, rank, gpu, world_size, epoch)
             _, _, _ = self.valid_pdb_cycle(ddp_model, valid_homo_loader, rank, gpu, world_size, epoch, header="Homo")
-            #_, _, _ = self.valid_ppi_cycle(ddp_model, valid_compl_loader, valid_neg_loader, rank, gpu, world_size, epoch)
+            _, _, _ = self.valid_ppi_cycle(ddp_model, valid_compl_loader, valid_neg_loader, rank, gpu, world_size, epoch)
 
             if rank == 0: # save model
                 if valid_tot < best_valid_loss:
@@ -613,6 +588,7 @@ class Trainer():
             symmids = symmids.to(gpu, non_blocking=True)
             symmRs = symmRs.to(gpu, non_blocking=True)
             symmoffset = symmoffset.to(gpu, non_blocking=True)
+            symmmeta = ([x.to(gpu, non_blocking=True) for x in symmmeta[0]], symmmeta[1])
             O = symmids.shape[0]
             xyz_prev = xyz_prev + symmoffset*Lasu**(1/3)
 

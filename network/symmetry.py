@@ -146,7 +146,7 @@ def get_symmetry(xyz, mask, rms_cut=2.5, nfold_cut=0.1, angle_cut=0.05, trans_cu
         dIJ = torch.linalg.norm(cIJ)
         p_mid = (cI+cJ).squeeze(0) / 2
         u = cIJ / dIJ            # unit vector in plane of circle
-        v = torch.cross(axis, u) # unit vector from sym axis to p_mid
+        v = torch.cross(axis, u, dim=-1) # unit vector from sym axis to p_mid
         r = dIJ / (2*torch.sin(angle/2))
         d = torch.sqrt( r*r - dIJ*dIJ/4 ) # distance from mid-chord to center
         point = p_mid - (d)*v

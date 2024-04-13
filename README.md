@@ -1,6 +1,11 @@
 # RF2
 GitHub repo for RoseTTAFold2
 
+Update Apr 12, 2024:
+- Updated config file
+- Better memory efficiency during inference
+- Symmetry bugfix
+
 ## Installation
 
 1. Clone the package
@@ -20,13 +25,14 @@ conda activate RF2
 cd SE3Transformer
 pip install --no-cache-dir -r requirements.txt
 python setup.py install
+cd ..
 ```
 
 3. Download pre-trained weights under network directory
 ```
 cd network
-wget https://files.ipd.uw.edu/dimaio/RF2_apr23.tgz
-tar xvfz RF2_apr23.tgz
+wget https://files.ipd.uw.edu/dimaio/RF2_jan24.tgz
+tar xvfz RF2_jan24.tgz
 cd ..
 ```
 

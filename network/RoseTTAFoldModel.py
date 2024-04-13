@@ -6,6 +6,8 @@ from AuxiliaryPredictor import DistanceNetwork, MaskedTokenNetwork, ExpResolvedN
 from util import INIT_CRDS
 from torch import einsum
 
+#from pytorch_memlab import LineProfiler, profile
+
 class RoseTTAFoldModule(nn.Module):
     def __init__(self, n_extra_block=4, n_main_block=8, n_ref_block=4,\
                  d_msa=256, d_msa_full=64, d_pair=128, d_templ=64,
@@ -46,12 +48,14 @@ class RoseTTAFoldModule(nn.Module):
         self.pae_pred = PAENetwork(d_pair)
         self.bind_pred = BinderNetwork() #fd - expose n_hidden as variable?
 
+    #@profile
     def forward(self, msa_latent=None, msa_full=None, seq=None, xyz=None, idx=None,
                 t1d=None, t2d=None, xyz_t=None, alpha_t=None, mask_t=None, same_chain=None,
                 msa_prev=None, pair_prev=None, state_prev=None, mask_recycle=None,
                 return_raw=False, return_full=False,
                 use_checkpoint=False, p2p_crop=-1, topk_crop=-1,
-                symmids=None, symmsub=None, symmRs=None, symmmeta=None):
+                symmids=None, symmsub=None, symmRs=None, symmmeta=None,
+                striping=None, low_vram=False):
         if symmids is None:
             symmids = torch.tensor([[0]], device=xyz.device) # C1
         oligo = symmids.shape[0]
@@ -60,32 +64,60 @@ class RoseTTAFoldModule(nn.Module):
         dtype = msa_latent.dtype
 
         # Get embeddings
-        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, symmids)
+        if striping is None:
+            msa_stripe = -1
+        else:
+            msa_stripe = striping['msa_emb']
+        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, stride=msa_stripe)
+        msa_latent, pair, state = (
+          msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
+        )
+
         msa_full = self.full_emb(msa_full, seq, idx, oligo)
-        msa_latent, pair, state = msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
         msa_full = msa_full.to(dtype)
 
-        #
         # Do recycling
         if msa_prev == None:
             msa_prev = torch.zeros_like(msa_latent[:,0])
             pair_prev = torch.zeros_like(pair)
             state_prev = torch.zeros_like(state)
-        msa_recycle, pair_recycle, state_recycle = self.recycle(seq, msa_prev, pair_prev, state_prev, xyz, mask_recycle)
-        msa_recycle, pair_recycle, state_recycle = msa_recycle.to(dtype), pair_recycle.to(dtype), state_recycle.to(dtype)
+        else:
+            msa_prev = msa_prev.to(msa_latent.device)
+            pair_prev = pair_prev.to(pair.device)
 
-        msa_latent[:,0] = msa_latent[:,0] + msa_recycle
-        pair = pair + pair_recycle
-        state = state + state_recycle
+        if striping is None:
+            recycl_stripe = -1
+        else:
+            recycl_stripe = striping['recycl']
+        msa_recycle, pair_recycle, state_recycle = self.recycle(
+          seq, msa_prev, pair_prev, state_prev, xyz, recycl_stripe, mask_recycle)
+        msa_recycle, pair_recycle = msa_recycle.to(dtype), pair_recycle.to(dtype)
+
+        msa_latent[:,0] += msa_recycle
+        pair += pair_recycle
+        state += state_recycle
+
+        # free unused
+        msa_prev, pair_prev, state_prev = None, None, None
+        msa_recycle, pair_recycle, state_recycle = None, None, None
 
         #
         # add template embedding
-        pair, state = self.templ_emb(t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, symmids=symmids)
-        
+        pair, state = self.templ_emb(
+          t1d, t2d, alpha_t, xyz_t, mask_t, pair, state, strides=striping,
+          use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, symmids=symmids
+        )
+
+        # free unused
+        t1d, t2d, alpha_t, xyz_t, mask_t = None, None, None, None, None
+
         # Predict coordinates from given inputs
         msa, pair, R, T, alpha, state, symmsub = self.simulator(
-            seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, symmids, symmsub, symmRs, symmmeta,
-            use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, topk_crop=topk_crop)
+            seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, 
+            striping, symmids, symmsub, symmRs, symmmeta,
+            use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, topk_crop=topk_crop, 
+            low_vram=low_vram
+        )
 
         if return_raw:
             # get last structure
@@ -94,23 +126,23 @@ class RoseTTAFoldModule(nn.Module):
 
         # predict masked amino acids
         logits_aa = self.aa_pred(msa)
-        #
+
         # predict distogram & orientograms
         logits = self.c6d_pred(pair)
-        
-        # Predict LDDT
-        lddt = self.lddt_pred(state)
 
-        # predict experimentally resolved or not
-        logits_exp = self.exp_pred(msa[:,0], state)
-        
         # predict PAE
         logits_pae = self.pae_pred(pair)
 
         # predict bind/no-bind
         p_bind = self.bind_pred(logits_pae,same_chain)
 
+        # Predict LDDT
+        lddt = self.lddt_pred(state)
+
+        # predict experimentally resolved or not
+        logits_exp = self.exp_pred(msa[:,0], state)
+
         # get all intermediate bb structures
         xyz = einsum('rblij,blaj->rblai', R, xyz-xyz[:,:,1].unsqueeze(-2)) + T.unsqueeze(-2)
-        
+
         return logits, logits_aa, logits_exp, logits_pae, p_bind, xyz, alpha, symmsub, lddt, msa[:,0], pair, state

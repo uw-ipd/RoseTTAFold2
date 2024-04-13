@@ -12,22 +12,15 @@ from symmetry import get_symmetry
 base_dir = "/projects/ml/TrRosetta/PDB-2021AUG02"
 compl_dir = "/projects/ml/RoseTTAComplex"
 fb_dir = "/projects/ml/TrRosetta/fb_af"
-if not os.path.exists(base_dir):
-    # training on blue
-    base_dir = "/gscratch2/PDB-2021AUG02"
-    compl_dir = "/gscratch2/RoseTTAComplex"
-    fb_dir = "/gscratch2/fb_af1"
 
 def set_data_loader_params(args):
     PARAMS = {
         "COMPL_LIST" : "%s/list.hetero.csv"%compl_dir,
         "HOMO_LIST" : "%s/list.homo.csv"%compl_dir,
         "NEGATIVE_LIST" : "%s/list.negative.csv"%compl_dir,
-        #"PDB_LIST"   : "%s/list_v02.csv"%base_dir,
-        "PDB_LIST"    : "/gscratch2/PDB-2021AUG02/list_v02.csv",
+        "PDB_LIST"   : "%s/list_v02.csv"%base_dir,
         "FB_LIST"    : "%s/list_b1-3.csv"%fb_dir,
-        #"VAL_PDB"    : "%s/val/xaa"%base_dir,
-        "VAL_PDB"   : "/gscratch2/PDB_val/xaa",
+        "VAL_PDB"    : "%s/val/xaa"%base_dir,
         "VAL_COMPL"  : "%s/val_lists/xaa"%compl_dir,
         "VAL_NEG"    : "%s/val_lists/xaa.neg"%compl_dir,
         "PDB_DIR"    : base_dir,
@@ -65,7 +58,7 @@ def MSABlockDeletion(msa, ins, nb=5):
     to_delete = block_start[:,None] + np.arange(block_size)[None,:]
     to_delete = np.unique(np.clip(to_delete, 1, N-1))
     #
-    mask = np.ones(N, np.bool)
+    mask = np.ones(N, bool)
     mask[to_delete] = 0
 
     return msa[mask], ins[mask]
@@ -778,7 +771,7 @@ def get_pdb(pdbfilename, plddtfilename, item, lddtcut, sccut):
     return {'xyz':torch.tensor(xyz), 'mask':torch.tensor(mask), 'idx': torch.tensor(res_idx), 'label':item}
 
 def get_msa(a3mfilename, item, max_seq=8000):
-    msa,ins = parse_a3m(a3mfilename, max_seq=max_seq)
+    msa,ins,_ = parse_a3m(a3mfilename, max_seq=max_seq)
     return {'msa':torch.tensor(msa), 'ins':torch.tensor(ins), 'label':item}
 
 # Load PDB examples

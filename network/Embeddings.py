@@ -164,7 +164,7 @@ class TemplatePairStack(nn.Module):
 
         # fd reduce memory in inference
         STRIDE = L
-        if (not self.training and strides['templ_pair']>0):
+        if (strides is not None):
             STRIDE = strides['templ_pair']
 
         out = torch.zeros((B*T,L,L,self.d_out), device=templ.device, dtype=t1d.dtype)
@@ -271,8 +271,15 @@ class Templ_emb(nn.Module):
         #   - state: query state features (B, L, d_state)
         B, T, L, _ = t1d.shape
 
-        templ = self._get_templ_emb(t1d, t2d, strides['templ_emb'])
-        rbf_feat = self._get_templ_rbf(xyz_t, mask_t, strides['templ_emb'])
+        if strides is None:
+            templ_emb_stripe = -1
+            templ_attn_stripe = -1
+        else:
+            templ_emb_stripe = strides['templ_emb']
+            templ_attn_stripe = strides['templ_attn']
+
+        templ = self._get_templ_emb(t1d, t2d, templ_emb_stripe)
+        rbf_feat = self._get_templ_rbf(xyz_t, mask_t, templ_emb_stripe)
 
         # process each template pair feature
         templ = self.templ_stack(
@@ -291,7 +298,7 @@ class Templ_emb(nn.Module):
             out = checkpoint.checkpoint(create_custom_forward(self.attn_tor), state, t1d, t1d)
             out = out.reshape(B, L, -1)
         else:
-            out = self.attn_tor(state, t1d, t1d, strides['templ_attn']).reshape(B, L, -1)
+            out = self.attn_tor(state, t1d, t1d, templ_attn_stripe).reshape(B, L, -1)
         state = state.reshape(B, L, -1)
         state += out
 
@@ -302,7 +309,7 @@ class Templ_emb(nn.Module):
             out = checkpoint.checkpoint(create_custom_forward(self.attn), pair, templ, templ)
             out = out.reshape(B, L, L, -1)
         else:
-            out = self.attn(pair, templ, templ, strides['templ_attn']).reshape(B, L, L, -1)
+            out = self.attn(pair, templ, templ, templ_attn_stripe).reshape(B, L, L, -1)
         #
         pair = pair.reshape(B, L, L, -1)
         pair += out

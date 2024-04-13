@@ -448,7 +448,7 @@ class XYZConverter(nn.Module):
         NCr = 0.5*(basexyzs[:,:,2,:3]+basexyzs[:,:,0,:3])
         CAr = (basexyzs[:,:,1,:3])
         CBr = (basexyzs[:,:,4,:3])
-        CBrotaxis1 = (CBr-CAr).cross(NCr-CAr)
+        CBrotaxis1 = (CBr-CAr).cross(NCr-CAr, dim=-1)
         CBrotaxis1 /= torch.linalg.norm(CBrotaxis1, dim=-1, keepdim=True)+1e-8
         
         # CB twist

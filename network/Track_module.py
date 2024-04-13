@@ -83,9 +83,18 @@ class MSAPairStr2MSA(nn.Module):
         B, N, L, _ = msa.shape
 
         # prepare input bias feature by combining pair & coordinate info
-        STRIDE = L
-        if (not self.training and strides['msa2msa']>0):
+        if strides is None:
+            STRIDE = L
+            stride_msarow_n = -1
+            stride_msarow_l = -1
+            stride_msacol = -1
+            stride_ff_m2m = -1
+        else:
             STRIDE = strides['msa2msa']
+            stride_msarow_n = strides['msarow_n']
+            stride_msarow_l = strides['msarow_l']
+            stride_msacol = strides['msacol']
+            stride_ff_m2m = strides['ff_m2m']
 
         pair_rbf = torch.zeros_like(pair)
         for i in range((L-1)//STRIDE+1):
@@ -103,9 +112,9 @@ class MSAPairStr2MSA(nn.Module):
         msa.index_add_(1, torch.tensor([0,], device=state.device), state)
         #
         # Apply row/column attention to msa & transform 
-        msa += self.drop_row(self.row_attn(msa, pair, strides['msarow_n'], strides['msarow_l']))
-        msa += self.col_attn(msa, strides['msacol'])
-        msa += self.ff(msa, strides['ff_m2m'])
+        msa += self.drop_row(self.row_attn(msa, pair, stride_msarow_n, stride_msarow_l))
+        msa += self.col_attn(msa, stride_msacol)
+        msa += self.ff(msa, stride_ff_m2m)
 
         return msa
 
@@ -202,9 +211,16 @@ class PairStr2Pair(nn.Module):
         left = self.proj_left(state)
         right = self.proj_right(state)
 
-        STRIDE = L
-        if (not self.training and strides['pair2pair']>0):
+        if strides is None:
+            STRIDE = L
+            stride_trimult = -1
+            stride_biasedax = -1
+            stride_ff_p2p = -1
+        else:
             STRIDE = strides['pair2pair']
+            stride_trimult = strides['trimult']
+            stride_biasedax = strides['biasedax']
+            stride_ff_p2p = strides['ff_p2p']
 
         rbf_feat_out = torch.zeros((B,L,L,self.d_pair), device=rbf_feat.device, dtype=rbf_feat.dtype)
         for i in range((L-1)//STRIDE+1):
@@ -241,14 +257,14 @@ class PairStr2Pair(nn.Module):
                 pair, rbf_feat, crop
             )
 
-            pair += self.ff(pair, strides['ff_p2p'])
+            pair += self.ff(pair, stride_ff_p2p)
 
         else:
-            pair += self.drop_row(self.tri_mul_out(pair, strides['trimult'])) 
-            pair += self.drop_row(self.tri_mul_in(pair, strides['trimult'])) 
-            pair += self.drop_row(self.row_attn(pair, rbf_feat, strides['biasedax'])) 
-            pair += self.drop_col(self.col_attn(pair, rbf_feat, strides['biasedax'])) 
-            pair += self.ff(pair, strides['ff_p2p'])
+            pair += self.drop_row(self.tri_mul_out(pair, stride_trimult)) 
+            pair += self.drop_row(self.tri_mul_in(pair, stride_trimult)) 
+            pair += self.drop_row(self.row_attn(pair, rbf_feat, stride_biasedax)) 
+            pair += self.drop_col(self.col_attn(pair, rbf_feat, stride_biasedax)) 
+            pair += self.ff(pair, stride_ff_p2p)
 
         return pair
 
@@ -287,7 +303,7 @@ class MSA2Pair(nn.Module):
         #return pair
 
         STRIDE = L
-        if (not self.training and strides['msa2pair']>0):
+        if (strides is not None):
             STRIDE = strides['msa2pair']
 
         msa = self.norm(msa)
@@ -523,9 +539,12 @@ class Str2Str(nn.Module):
         dtype = msa.dtype
 
         ## node features
-        STRIDE = L
-        if (not self.training and strides['str2str']>0):
+        if (strides is None):
+            STRIDE = L
+            stride_ff_s2s = -1
+        else:
             STRIDE = strides['str2str']
+            stride_ff_s2s = strides['ff_s2s']
 
         node = torch.zeros((B,L,self.n_node), device=msa.device, dtype=torch.float32) # force f32
         for i in range((L-1)//STRIDE+1):
@@ -533,7 +552,7 @@ class Str2Str(nn.Module):
             seq_i = self.norm_msa(msa[:,0,rows])
             state[:,rows] = self.norm_state(state[:,rows]).to(state.dtype) # update inplace
             node_i = self.embed_node1(seq_i) + self.embed_node2(state[:,rows])
-            node_i += self.ff_node(node_i,strides['ff_s2s'])
+            node_i += self.ff_node(node_i,stride_ff_s2s)
             node[:,rows] = self.norm_node(node_i)
         node = node.reshape(B*L, -1, 1)
 
@@ -550,7 +569,7 @@ class Str2Str(nn.Module):
                 rbf_feat_ij = rbf(torch.cdist(xyz[:,rows,1], xyz[:,cols,1])).reshape(B,NR,NC,-1)
                 rbf_feat_ij = torch.cat((rbf_feat_ij, seqsep[:,rows[:,None],cols[None,:]]), dim=-1)
                 edge_ij = self.embed_edge1(pair_ij) + self.embed_edge2(rbf_feat_ij)
-                edge_ij += self.ff_edge(edge_ij,strides['ff_s2s'])
+                edge_ij += self.ff_edge(edge_ij,stride_ff_s2s)
                 edge[:,rows[:,None],cols[None,:]] = self.norm_edge(edge_ij).to(msa.dtype)
 
         # define graph
@@ -618,7 +637,7 @@ class IterBlock(nn.Module):
         B,L = pair.shape[:2]
 
         STRIDE = L
-        if (not self.training and strides['iter']>0):
+        if (strides is not None):
             STRIDE = strides['iter']
 
         xyzfull = xyz.view(1,B*L,3,3)

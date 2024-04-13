@@ -64,7 +64,11 @@ class RoseTTAFoldModule(nn.Module):
         dtype = msa_latent.dtype
 
         # Get embeddings
-        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, stride=striping['msa_emb'])
+        if striping is None:
+            msa_stripe = -1
+        else:
+            msa_stripe = striping['msa_emb']
+        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, stride=msa_stripe)
         msa_latent, pair, state = (
           msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
         )
@@ -81,8 +85,12 @@ class RoseTTAFoldModule(nn.Module):
             msa_prev = msa_prev.to(msa_latent.device)
             pair_prev = pair_prev.to(pair.device)
 
+        if striping is None:
+            recycl_stripe = -1
+        else:
+            recycl_stripe = striping['recycl']
         msa_recycle, pair_recycle, state_recycle = self.recycle(
-          seq, msa_prev, pair_prev, state_prev, xyz, striping['recycl'], mask_recycle)
+          seq, msa_prev, pair_prev, state_prev, xyz, recycl_stripe, mask_recycle)
         msa_recycle, pair_recycle = msa_recycle.to(dtype), pair_recycle.to(dtype)
 
         msa_latent[:,0] += msa_recycle

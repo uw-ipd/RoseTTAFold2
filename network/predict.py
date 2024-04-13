@@ -38,7 +38,7 @@ def get_args():
     parser.add_argument("-db", help="HHpred database location", default=None)
     parser.add_argument("-prefix", default="S", type=str, help="Output file prefix [S]")
     parser.add_argument("-symm", default="C1", help="Symmetry group (Cn,Dn,T,O, or I).  If provided, 'input' should cover the asymmetric unit. [C1]")
-    parser.add_argument("-model", default=default_model, help="Model weights. [weights/RF2_apr23.pt]")
+    parser.add_argument("-model", default=default_model, help="Model weights. [weights/RF2_jan24.pt]")
     parser.add_argument("-n_recycles", default=3, type=int, help="Number of recycles to use [3].")
     parser.add_argument("-n_models", default=1, type=int, help="Number of models to predict [1].")
     parser.add_argument("-subcrop", default=-1, type=int, help="Subcrop pair-to-pair updates. A value of -1 means no subcropping. [-1]")
@@ -553,19 +553,16 @@ class Predictor():
                 prob_s.append(prob.half().cpu())
 
         # full complex
-        xyz_prev = xyz_prev.float().cpu()
+        best_xyz = best_xyz.float().cpu()
         symmRs = symmRs.cpu()
-        best_xyzfull = torch.zeros( (B,O*Lasu,27,3),device=best_xyz.device )
+        best_xyzfull = torch.zeros( (B,O*Lasu,27,3) )
         best_xyzfull[:,:Lasu] = best_xyz[:,:Lasu]
-        last_xyzfull = torch.zeros( (B,O*Lasu,27,3),device=xyz_prev.device )
-        last_xyzfull[:,:Lasu] = xyz_prev[:,:Lasu]
-        seq_full = torch.zeros( (B,O*Lasu),dtype=seq.dtype, device=seq.device )
+        seq_full = torch.zeros( (B,O*Lasu),dtype=seq.dtype )
         seq_full[:,:Lasu] = seq[:,:Lasu]
-        best_lddtfull = torch.zeros( (B,O*Lasu),device=best_lddt.device )
+        best_lddtfull = torch.zeros( (B,O*Lasu) )
         best_lddtfull[:,:Lasu] = best_lddt[:,:Lasu]
         for i in range(1,O):
             best_xyzfull[:,(i*Lasu):((i+1)*Lasu)] = torch.einsum('ij,braj->brai', symmRs[i], best_xyz[:,:Lasu])
-            last_xyzfull[:,(i*Lasu):((i+1)*Lasu)] = torch.einsum('ij,braj->brai', symmRs[i], xyz_prev[:,:Lasu])
             seq_full[:,(i*Lasu):((i+1)*Lasu)] = seq[:,:Lasu]
             best_lddtfull[:,(i*Lasu):((i+1)*Lasu)] = best_lddt[:,:Lasu]
 

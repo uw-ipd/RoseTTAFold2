@@ -110,7 +110,8 @@ class MSAPairStr2MSA(nn.Module):
         state = self.norm_state(state)
         state = self.proj_state(state).reshape(B, 1, L, -1)
         if self.training:
-            msa = msa + msa.index_add(1, torch.tensor([0,], device=state.device), state.to(msa.dtype))
+            msa = msa.type_as(state)
+            msa = msa.index_add(1, torch.tensor([0,], device=state.device), state)
             msa = msa + self.drop_row(self.row_attn(msa, pair, stride_msarow_n, stride_msarow_l))
             msa = msa + self.col_attn(msa, stride_msacol)
             msa = msa + self.ff(msa, stride_ff_m2m)

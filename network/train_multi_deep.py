@@ -204,7 +204,7 @@ class Trainer():
         mask_clash = (lj_nat < clashcut) * mask_BB[0] # if False, the residue has clash (L)
         xs_mask[:,:,5:] *= mask_clash.view(1,L,1) # ignore clashed side-chains
         
-        # col 5: experimentally resolved prediction loss
+        # experimentally resolved prediction loss
         loss = nn.BCEWithLogitsLoss()(logit_exp, mask_BB.float())
         tot_loss += w_exp*loss
         loss_s.append(loss[None].detach())

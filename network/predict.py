@@ -323,7 +323,15 @@ class Predictor():
         ###
         # pass 2, templates
         L = sum(Ls)
-        xyz_t = INIT_CRDS.reshape(1,1,27,3).repeat(n_templ,L,1,1) + torch.rand(n_templ,L,1,3)*5.0 - 2.5
+        #xyz_t = INIT_CRDS.reshape(1,1,27,3).repeat(n_templ,L,1,1) + torch.rand(n_templ,L,1,3)*5.0 - 2.5
+        # dummy template
+        SYMM_OFFSET_SCALE = 1.0
+        xyz_t = (
+            INIT_CRDS.reshape(1,1,27,3).repeat(n_templ,L,1,1) 
+            + torch.rand(n_templ,L,1,3)*5.0 - 2.5
+            + SYMM_OFFSET_SCALE*symmoffset*L**(1/2)  # note: offset based on symmgroup
+        )
+
         mask_t = torch.full((n_templ, L, 27), False) 
         t1d = torch.nn.functional.one_hot(torch.full((n_templ, L), 20).long(), num_classes=21).float() # all gaps
         t1d = torch.cat((t1d, torch.zeros((n_templ,L,1)).float()), -1)

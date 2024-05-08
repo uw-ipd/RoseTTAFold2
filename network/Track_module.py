@@ -109,12 +109,16 @@ class MSAPairStr2MSA(nn.Module):
         # update query sequence feature (first sequence in the MSA) with feedbacks (state) from SE3
         state = self.norm_state(state)
         state = self.proj_state(state).reshape(B, 1, L, -1)
-        msa.index_add_(1, torch.tensor([0,], device=state.device), state)
-        #
-        # Apply row/column attention to msa & transform 
-        msa += self.drop_row(self.row_attn(msa, pair, stride_msarow_n, stride_msarow_l))
-        msa += self.col_attn(msa, stride_msacol)
-        msa += self.ff(msa, stride_ff_m2m)
+        if self.training:
+            msa = msa + msa.index_add(1, torch.tensor([0,], device=state.device), state)
+            msa = msa + self.drop_row(self.row_attn(msa, pair, stride_msarow_n, stride_msarow_l))
+            msa = msa + self.col_attn(msa, stride_msacol)
+            msa = msa + self.ff(msa, stride_ff_m2m)
+        else:
+            msa.index_add_(1, torch.tensor([0,], device=state.device), state)
+            msa += self.drop_row(self.row_attn(msa, pair, stride_msarow_n, stride_msarow_l))
+            msa += self.col_attn(msa, stride_msacol)
+            msa += self.ff(msa, stride_ff_m2m)
 
         return msa
 
@@ -222,20 +226,28 @@ class PairStr2Pair(nn.Module):
             stride_biasedax = strides['biasedax']
             stride_ff_p2p = strides['ff_p2p']
 
-        rbf_feat_out = torch.zeros((B,L,L,self.d_pair), device=rbf_feat.device, dtype=rbf_feat.dtype)
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
-            for j in range((L-1)//STRIDE+1):
-                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=pair.device)
-                NR,NC = rows.shape[0], cols.shape[0]
-                gate_ij = einsum('bli,bmj->blmij', left[:,rows], right[:,cols]).reshape(B,NR,NC,-1)
-                gate_ij = torch.sigmoid(self.to_gate(gate_ij))
-                rbf_feat_i = self.emb_rbf( rbf_feat[:,rows[:,None],cols[None,:]] )
-                rbf_feat_out[:,rows[:,None],cols[None,:]] = (rbf_feat_i*gate_ij).to(rbf_feat.dtype)
-        rbf_feat = rbf_feat_out
+        if STRIDE>0 and STRIDE<L:
+            rbf_feat_out = torch.zeros((B,L,L,self.d_pair), device=rbf_feat.device, dtype=rbf_feat.dtype)
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
+                for j in range((L-1)//STRIDE+1):
+                    cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=pair.device)
+                    NR,NC = rows.shape[0], cols.shape[0]
+                    gate_ij = einsum('bli,bmj->blmij', left[:,rows], right[:,cols]).reshape(B,NR,NC,-1)
+                    gate_ij = torch.sigmoid(self.to_gate(gate_ij))
+                    rbf_feat_i = self.emb_rbf( rbf_feat[:,rows[:,None],cols[None,:]] )
+                    rbf_feat_out[:,rows[:,None],cols[None,:]] = (rbf_feat_i*gate_ij).to(rbf_feat.dtype)
+            rbf_feat = rbf_feat_out
+        else:
+            rbf_feat = self.emb_rbf(rbf_feat)
+            state = self.norm_state(state)
+            left = self.proj_left(state)
+            right = self.proj_right(state)
+            gate = einsum('bli,bmj->blmij', left, right).reshape(B,L,L,-1)
+            gate = torch.sigmoid(self.to_gate(gate))
+            rbf_feat = gate*rbf_feat
 
         crop = 2*(crop//2) # make sure even
-
         if (crop>0 and crop<=L):
             pair = self.subblock( 
                 lambda x,y:self.drop_row(self.tri_mul_out(x)), 
@@ -260,11 +272,18 @@ class PairStr2Pair(nn.Module):
             pair += self.ff(pair, stride_ff_p2p)
 
         else:
-            pair += self.drop_row(self.tri_mul_out(pair, stride_trimult)) 
-            pair += self.drop_row(self.tri_mul_in(pair, stride_trimult)) 
-            pair += self.drop_row(self.row_attn(pair, rbf_feat, stride_biasedax)) 
-            pair += self.drop_col(self.col_attn(pair, rbf_feat, stride_biasedax)) 
-            pair += self.ff(pair, stride_ff_p2p)
+            if self.training:
+                pair = pair + self.drop_row(self.tri_mul_out(pair, stride_trimult)) 
+                pair = pair + self.drop_row(self.tri_mul_in(pair, stride_trimult)) 
+                pair = pair + self.drop_row(self.row_attn(pair, rbf_feat, stride_biasedax)) 
+                pair = pair + self.drop_col(self.col_attn(pair, rbf_feat, stride_biasedax)) 
+                pair = pair + self.ff(pair, stride_ff_p2p)
+            else:
+                pair += self.drop_row(self.tri_mul_out(pair, stride_trimult)) 
+                pair += self.drop_row(self.tri_mul_in(pair, stride_trimult)) 
+                pair += self.drop_row(self.row_attn(pair, rbf_feat, stride_biasedax)) 
+                pair += self.drop_col(self.col_attn(pair, rbf_feat, stride_biasedax)) 
+                pair += self.ff(pair, stride_ff_p2p)
 
         return pair
 
@@ -293,34 +312,33 @@ class MSA2Pair(nn.Module):
     def forward(self, msa, pair, strides):
         B, N, L = msa.shape[:3]
 
-        #msa = self.norm(msa)
-        #left = self.proj_left(msa)
-        #right = self.proj_right(msa)
-        #right = right / float(N)
-        #out = einsum('bsli,bsmj->blmij', left, right).reshape(B, L, L, -1)
-        #out = self.proj_out(out)
-        #pair = pair + out
-        #return pair
-
         STRIDE = L
         if (strides is not None):
             STRIDE = strides['msa2pair']
 
         msa = self.norm(msa)
 
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
-            left = self.proj_left(msa[:,:,rows])
-            for j in range((L-1)//STRIDE+1):
-                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=pair.device)
-                NR,NC = rows.shape[0], cols.shape[0]
-                right = self.proj_right(msa[:,:,cols])
-                right = right / float(N)
+        if (STRIDE > 0 and STRIDE < L):
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=pair.device)
+                left = self.proj_left(msa[:,:,rows])
+                for j in range((L-1)//STRIDE+1):
+                    cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=pair.device)
+                    NR,NC = rows.shape[0], cols.shape[0]
+                    right = self.proj_right(msa[:,:,cols])
+                    right = right / float(N)
 
-                out_ij = einsum('bsli,bsmj->blmij', left, right).reshape(B, NR,NC, -1)
-                out_ij = self.proj_out(out_ij)
-                pair[:,rows[:,None],cols[None,:]] += out_ij
-        
+                    out_ij = einsum('bsli,bsmj->blmij', left, right).reshape(B, NR,NC, -1)
+                    out_ij = self.proj_out(out_ij)
+                    pair[:,rows[:,None],cols[None,:]] += out_ij
+        else:
+            left = self.proj_left(msa)
+            right = self.proj_right(msa)
+            right = right / float(N)
+            out = einsum('bsli,bsmj->blmij', left, right).reshape(B, L, L, -1)
+            out = self.proj_out(out)
+            pair = pair + out
+
         return pair
 
 class SCPred(nn.Module):
@@ -377,10 +395,10 @@ class SCPred(nn.Module):
         state = self.norm_si(state)
         si = self.linear_s0(seq) + self.linear_si(state)
 
-        si = si + self.linear_2(F.relu_(self.linear_1(F.relu_(si))))
-        si = si + self.linear_4(F.relu_(self.linear_3(F.relu_(si))))
+        si = si + self.linear_2(F.relu(self.linear_1(F.relu(si))))
+        si = si + self.linear_4(F.relu(self.linear_3(F.relu(si))))
 
-        si = self.linear_out(F.relu_(si))
+        si = self.linear_out(F.relu(si))
         return si.view(B, L, 10, 2)
 
 def update_symm_Rs(Rs, Ts, Lasu, symmsub_in, symmsub, symmRs):
@@ -400,24 +418,6 @@ def update_symm_Rs(Rs, Ts, Lasu, symmsub_in, symmsub, symmRs):
     Tmean = Ts[:,:Lasu].reshape(-1,3).mean(dim=0)
     Tmean = torch.einsum('sij,j->si', symmRs, Tmean).mean(dim=0)
     Ts = Ts - Tmean
-
-    # symmetry correction 2: use minimization to minimize drms
-    #with torch.enable_grad():
-    #    T0 = torch.zeros(3,device=Ts.device).requires_grad_(True)
-    #    R0 = torch.eye(3,device=Ts.device).requires_grad_(True)
-    #    opt = torch.optim.SGD([T0,R0], lr=0.001)
-    #
-    #    if (dist_error(R0,T0,symmRs[symmsub],Ts)>0.5):
-    #        for e in range(101):
-    #            loss = dist_error(R0,T0,symmRs[symmsub],Ts)
-    #            if (e%50 == 0):
-    #                print (e,loss)
-    #            opt.zero_grad()
-    #            loss.backward()
-    #            opt.step()
-    #
-    #Tcom = Ts[:,:Lasu].mean(dim=1,keepdim=True)
-    #Ts = torch.einsum('ij,brj->bri', R0, Ts[:,:Lasu]-Tcom) +Tcom + 10.0*T0[None,None,:]
 
     Rs = torch.einsum('sij,brjk,slk->bsril', symmRs[symmsub], Rs[:,:Lasu], symmRs[symmsub_in])
     Ts = torch.einsum('sij,brj->bsri', symmRs[symmsub], Ts[:,:Lasu])
@@ -474,16 +474,6 @@ def update_symm_subs(Rs, Ts, pair, symmids, symmsub_in, symmsub, symmRs, metasym
                     + torch.arange(jnew*L,(jnew+1)*L)[None,:]
                 )
     pair = pair.view(1,-1,pair.shape[-1])[:,idx.flatten(),:].view(1,Osub*L,Osub*L,pair.shape[-1])
-
-    #for i in range(Osub):
-    #    for j in range(Osub):
-    #        idx_new = s_new[i,j].item()
-    #        if idx_new in pairsub:
-    #            pass
-    #            #pair[:,i*L:(i+1)*L,j*L:(j+1)*L,:] = pairsub[idx_new] #/pairmag[idx_new]
-
-    #if (torch.any(symmsub!=symmsub_new)):
-    #    print (symmsub,'->',symmsub_new)
 
     if symmsub_in is not None and symmsub_in.shape[0]>1:
         Rs, Ts = update_symm_Rs(Rs, Ts, L, symmsub_in, symmsub_new, symmRs)
@@ -546,31 +536,48 @@ class Str2Str(nn.Module):
             STRIDE = strides['str2str']
             stride_ff_s2s = strides['ff_s2s']
 
-        node = torch.zeros((B,L,self.n_node), device=msa.device, dtype=torch.float32) # force f32
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=msa.device)
-            seq_i = self.norm_msa(msa[:,0,rows])
-            state[:,rows] = self.norm_state(state[:,rows]).to(state.dtype) # update inplace
-            node_i = self.embed_node1(seq_i) + self.embed_node2(state[:,rows])
-            node_i += self.ff_node(node_i,stride_ff_s2s)
-            node[:,rows] = self.norm_node(node_i)
+        if STRIDE > 0 and STRIDE < L:
+            node = torch.zeros((B,L,self.n_node), device=msa.device, dtype=torch.float32) # force f32
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=msa.device)
+                seq_i = self.norm_msa(msa[:,0,rows])
+                state[:,rows] = self.norm_state(state[:,rows]).to(state.dtype) # update inplace
+                node_i = self.embed_node1(seq_i) + self.embed_node2(state[:,rows])
+                node_i += self.ff_node(node_i,stride_ff_s2s)
+                node[:,rows] = self.norm_node(node_i)
+        else:
+            seq = self.norm_msa(msa[:,0])
+            node = self.embed_node1(seq) + self.embed_node2(state)
+            node = node + self.ff_node(node)
+            node = self.norm_node(node)
+
         node = node.reshape(B*L, -1, 1)
 
         ## pair features
-        edge = torch.zeros((B,L,L,self.n_edge), device=msa.device, dtype=msa.dtype)
         seqsep = get_seqsep(idx_in)
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=msa.device)
-            for j in range((L-1)//STRIDE+1):
-                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=msa.device)
 
-                NR, NC = rows.shape[0], cols.shape[0]
-                pair_ij = self.norm_pair( pair[:,rows[:,None],cols[None,:]] )
-                rbf_feat_ij = rbf(torch.cdist(xyz[:,rows,1], xyz[:,cols,1])).reshape(B,NR,NC,-1)
-                rbf_feat_ij = torch.cat((rbf_feat_ij, seqsep[:,rows[:,None],cols[None,:]]), dim=-1)
-                edge_ij = self.embed_edge1(pair_ij) + self.embed_edge2(rbf_feat_ij)
-                edge_ij += self.ff_edge(edge_ij,stride_ff_s2s)
-                edge[:,rows[:,None],cols[None,:]] = self.norm_edge(edge_ij).to(msa.dtype)
+        if STRIDE > 0 and STRIDE < L:
+            edge = torch.zeros((B,L,L,self.n_edge), device=msa.device, dtype=msa.dtype)
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=msa.device)
+                for j in range((L-1)//STRIDE+1):
+                    cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=msa.device)
+
+                    NR, NC = rows.shape[0], cols.shape[0]
+                    pair_ij = self.norm_pair( pair[:,rows[:,None],cols[None,:]] )
+                    rbf_feat_ij = rbf(torch.cdist(xyz[:,rows,1], xyz[:,cols,1])).reshape(B,NR,NC,-1)
+                    rbf_feat_ij = torch.cat((rbf_feat_ij, seqsep[:,rows[:,None],cols[None,:]]), dim=-1)
+                    edge_ij = self.embed_edge1(pair_ij) + self.embed_edge2(rbf_feat_ij)
+                    edge_ij += self.ff_edge(edge_ij,stride_ff_s2s)
+                    edge[:,rows[:,None],cols[None,:]] = self.norm_edge(edge_ij).to(msa.dtype)
+        else:
+            pair = self.norm_pair(pair)
+            rbf_feat = rbf(torch.cdist(xyz[:,:,1], xyz[:,:,1])).reshape(B,L,L,-1)
+            rbf_feat = torch.cat((rbf_feat, seqsep), dim=-1)
+            edge = self.embed_edge1(pair) + self.embed_edge2(rbf_feat)
+            edge = edge + self.ff_edge(edge)
+            edge = self.norm_edge(edge)
+
 
         # define graph
         G, edge_feats = make_topk_graph(xyz[:,:,1,:].detach(), edge, idx_in, top_k=top_k)
@@ -654,11 +661,13 @@ class IterBlock(nn.Module):
                 rbf_feat[:,rows[:,None],cols[None,:]] = rbf_feat_ij
 
         if use_checkpoint:
-            msa = checkpoint.checkpoint(create_custom_forward(self.msa2msa), msa, pair, rbf_feat, state, strides)
-            pair = checkpoint.checkpoint(create_custom_forward(self.msa2pair), msa, pair, strides)
-            pair = checkpoint.checkpoint(create_custom_forward(self.pair2pair), pair, rbf_feat, state, strides, crop)
-            R, T, state, alpha = checkpoint.checkpoint(create_custom_forward(self.str2str, top_k=topk), 
-                msa, pair, R_in, T_in, xyz, state, idx, strides)
+            msa = checkpoint.checkpoint(create_custom_forward(self.msa2msa), msa, pair, rbf_feat, state, strides, use_reentrant=True)
+            pair = checkpoint.checkpoint(create_custom_forward(self.msa2pair), msa, pair, strides, use_reentrant=True)
+            pair = checkpoint.checkpoint(create_custom_forward(self.pair2pair), pair, rbf_feat, state, strides, crop, use_reentrant=True)
+            R, T, state, alpha = checkpoint.checkpoint(
+                create_custom_forward(self.str2str, top_k=topk), 
+                msa, pair, R_in, T_in, xyz, state, idx, strides, use_reentrant=True
+            )
         else:
             msa = self.msa2msa(msa, pair, rbf_feat, state, strides)
             pair = self.msa2pair(msa, pair, strides)

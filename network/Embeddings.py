@@ -158,7 +158,7 @@ class TemplatePairStack(nn.Module):
 
         for i_block in range(self.n_block):
             if use_checkpoint:
-                templ = checkpoint.checkpoint(create_custom_forward(self.block[i_block]), templ, rbf_feat, state, strides, p2p_crop) 
+                templ = checkpoint.checkpoint(create_custom_forward(self.block[i_block]), templ, rbf_feat, state, strides, p2p_crop, use_reentrant=True) 
             else:
                 templ = self.block[i_block](templ, rbf_feat, state, strides, p2p_crop)
 
@@ -271,7 +271,7 @@ class Templ_emb(nn.Module):
         #   - state: query state features (B, L, d_state)
         B, T, L, _ = t1d.shape
 
-        if strides is None:
+        if strides is None or self.training:
             templ_emb_stripe = -1
             templ_attn_stripe = -1
         else:
@@ -295,24 +295,30 @@ class Templ_emb(nn.Module):
         state = state.reshape(B*L, 1, -1) # (B*L, 1, d_state)
         t1d = t1d.permute(0,2,1,3).reshape(B*L, T, -1)
         if use_checkpoint:
-            out = checkpoint.checkpoint(create_custom_forward(self.attn_tor), state, t1d, t1d)
+            out = checkpoint.checkpoint(create_custom_forward(self.attn_tor), state, t1d, t1d, templ_attn_stripe, use_reentrant=True)
             out = out.reshape(B, L, -1)
         else:
             out = self.attn_tor(state, t1d, t1d, templ_attn_stripe).reshape(B, L, -1)
         state = state.reshape(B, L, -1)
-        state += out
+        if self.training:
+            state = state + out
+        else:
+            state += out
 
         # mixing query pair features to template information (Template pointwise attention)
         pair = pair.reshape(B*L*L, 1, -1)
         templ = templ.permute(0, 2, 3, 1, 4).reshape(B*L*L, T, -1)
         if use_checkpoint:
-            out = checkpoint.checkpoint(create_custom_forward(self.attn), pair, templ, templ)
+            out = checkpoint.checkpoint(create_custom_forward(self.attn), pair, templ, templ, templ_attn_stripe, use_reentrant=True)
             out = out.reshape(B, L, L, -1)
         else:
             out = self.attn(pair, templ, templ, templ_attn_stripe).reshape(B, L, L, -1)
         #
         pair = pair.reshape(B, L, L, -1)
-        pair += out
+        if self.training:
+            pair = pair + out
+        else:
+            pair += out
 
         return pair, state
 
@@ -347,13 +353,17 @@ class Recycling(nn.Module):
 
         state = self.norm_state(state)
 
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            msa_i = msa[:,rows]
-            msa[:,rows] = self.norm_msa(msa_i).to(dtype)
+        if STRIDE<L:
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+                msa_i = msa[:,rows]
+                msa[:,rows] = self.norm_msa(msa_i).to(dtype)
 
-            pair_i = pair[:,rows]
-            pair[:,rows] = self.norm_pair(pair_i).to(dtype)
+                pair_i = pair[:,rows]
+                pair[:,rows] = self.norm_pair(pair_i).to(dtype)
+        else:
+            msa = self.norm_msa(msa).to(dtype)
+            pair = self.norm_pair(pair).to(dtype)
 
         ## SYMM
         left = state.to(dtype).unsqueeze(2).expand(-1,-1,L,-1)
@@ -363,20 +373,27 @@ class Recycling(nn.Module):
         Cb = get_Cb(xyz[:,:,:3])
 
         dist_CB = torch.zeros((B,L,L,self.d_rbf), device=msa.device, dtype=dtype)
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            dist_CB[:,rows] = rbf(
-                torch.cdist(Cb[:,rows], Cb)
-            ).to(dtype)
+
+        if STRIDE<L:
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+                dist_CB[:,rows] = rbf(
+                    torch.cdist(Cb[:,rows], Cb)
+                ).to(dtype)
+        else:
+            dist_CB = rbf( torch.cdist( Cb, Cb ) ).to(dtype)
 
         if mask_recycle != None:
             dist_CB = mask_recycle[...,None].to(dtype)*dist_CB
 
         dist_CB = torch.cat((dist_CB, left, right), dim=-1)
 
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            pair[:,rows] += self.proj_dist(dist_CB[:,rows])
+        if STRIDE<L:
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+                pair[:,rows] += self.proj_dist(dist_CB[:,rows])
+        else:
+            pair += self.proj_dist(dist_CB)
 
         return msa, pair, state
 

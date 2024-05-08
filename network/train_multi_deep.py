@@ -25,14 +25,14 @@ torch.backends.cudnn.deterministic = True
 
 torch.autograd.set_detect_anomaly(True)
 
-USE_AMP = False
+USE_AMP = True
 
 N_PRINT_TRAIN = 1
 #BATCH_SIZE = 1 * torch.cuda.device_count()
 
 # num structs per epoch
 # must be divisible by #GPUs
-N_EXAMPLE_PER_EPOCH = 3*3200
+N_EXAMPLE_PER_EPOCH = 4*3200
 
 
 LOAD_PARAM = {'shuffle': False,
@@ -674,7 +674,17 @@ class Trainer():
                            msa, mask_msa, idx_pdb, unclamp, negative, symmRs, Lasu,
                            pred_prev_s=None, return_cnt=False):
         logit_s, logit_aa_s, logit_exp, logit_pae, p_bind, pred_crds, alphas, symmsubs, pred_lddts, _, _, _ = output_i
-            
+
+        # to float
+        logit_s = tuple(x.float() for x in logit_s)
+        logit_aa_s = logit_aa_s.float()
+        logit_exp = logit_exp.float()
+        logit_pae = logit_pae.float()
+        p_bind = p_bind.float()
+        pred_crds = pred_crds.float()
+        alphas = alphas.float()
+        pred_lddts = pred_lddts.float()
+
         if (symmRs is not None):
             #print ('a', pred_crds.shape, true_crds.shape, mask_crds.shape)
             ###
@@ -771,11 +781,11 @@ class Trainer():
                     if i_cycle < N_cycle -1:
                         stack.enter_context(torch.no_grad())
                         stack.enter_context(ddp_model.no_sync())
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         return_raw=True
                         use_checkpoint=False
                     else:
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         return_raw=False
                         use_checkpoint=True
                     
@@ -892,7 +902,7 @@ class Trainer():
                 pred_prev_s = list()
                 for i_cycle in range(N_cycle):
                     with ExitStack() as stack:
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         stack.enter_context(ddp_model.no_sync())
                         use_checkpoint=False
                         if i_cycle < N_cycle -1:
@@ -981,7 +991,7 @@ class Trainer():
                 pred_prev_s = list()
                 for i_cycle in range(N_cycle): 
                     with ExitStack() as stack:
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         stack.enter_context(ddp_model.no_sync())
                         use_checkpoint=False
                         if i_cycle < N_cycle - 1:
@@ -1076,7 +1086,7 @@ class Trainer():
                 pred_prev_s = list()
                 for i_cycle in range(N_cycle): 
                     with ExitStack() as stack:
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         stack.enter_context(ddp_model.no_sync())
                         if i_cycle < N_cycle - 1:
                             return_raw=True

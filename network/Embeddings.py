@@ -35,13 +35,17 @@ class PositionalEncoding2D(nn.Module):
         if (not self.training and stride>0):
             STRIDE = stride
 
-        emb = torch.zeros((B,L,L,self.d_out), device=idx.device, dtype=self.emb.weight.dtype)
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=idx.device)[:,None]
-            for j in range((L-1)//STRIDE+1):
-                cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=idx.device)[None,:]
-                ib = torch.bucketize(seqsep[:,rows,cols], bins).long()
-                emb[:,rows,cols] = self.emb(ib)
+        if STRIDE>0 and STRIDE<L:
+            emb = torch.zeros((B,L,L,self.d_out), device=idx.device, dtype=self.emb.weight.dtype)
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L), device=idx.device)[:,None]
+                for j in range((L-1)//STRIDE+1):
+                    cols = torch.arange(j*STRIDE, min((j+1)*STRIDE, L), device=idx.device)[None,:]
+                    ib = torch.bucketize(seqsep[:,rows,cols], bins).long()
+                    emb[:,rows,cols] = self.emb(ib)
+        else:
+            ib = torch.bucketize(seqsep, bins).long() # (B, L, L)
+            emb = self.emb(ib) #(B, L, L, d_model)
 
         return emb
 
@@ -164,13 +168,16 @@ class TemplatePairStack(nn.Module):
 
         # fd reduce memory in inference
         STRIDE = L
-        if (strides is not None):
+        if strides is not None and not self.training:
             STRIDE = strides['templ_pair']
 
-        out = torch.zeros((B*T,L,L,self.d_out), device=templ.device, dtype=t1d.dtype)
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            out[:,:,rows] = self.norm(templ[:,:,rows]).to(t1d.dtype)
+        if STRIDE>0 and STRIDE<L:
+            out = torch.zeros((B*T,L,L,self.d_out), device=templ.device, dtype=t1d.dtype)
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+                out[:,:,rows] = self.norm(templ[:,:,rows]).to(t1d.dtype)
+        else:
+            out = self.norm(templ)
 
         return out.reshape(B, T, L, L, -1)
 
@@ -226,10 +233,13 @@ class Templ_emb(nn.Module):
         right = t1d.unsqueeze(2).expand(-1,-1,L,-1,-1)
         #
         templ = torch.cat((t2d.to(t1d.device), left, right), -1) # (B, T, L, L, 88)
-        out = torch.zeros((B,T,L,L,self.d_templ), device=t1d.device, dtype=t2d.dtype)
-        for i in range((L-1)//STRIDE+1):
-            rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
-            out[:,:,rows] = self.emb(templ[:,:,rows])
+        if STRIDE>0 and STRIDE<L:
+            out = torch.zeros((B,T,L,L,self.d_templ), device=t1d.device, dtype=t2d.dtype)
+            for i in range((L-1)//STRIDE+1):
+                rows = torch.arange(i*STRIDE, min((i+1)*STRIDE, L))
+                out[:,:,rows] = self.emb(templ[:,:,rows])
+        else:
+            out = self.emb(templ)
 
         return out # Template templures (B, T, L, L, d_templ)
 

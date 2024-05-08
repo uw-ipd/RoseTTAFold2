@@ -620,6 +620,8 @@ class TriangleMultiplication(nn.Module):
                   gate = torch.sigmoid(self.gate(pair_ij)) # (B, L, L, d_pair)
                   out[:,rows[:,None],cols[None,:]] = (gate * out_ij)
         else:
+            pair = self.norm(pair)
+
             left = self.left_proj(pair) # (B, L, L, d_h)
             left_gate = torch.sigmoid(self.left_gate(pair))
             left = left_gate * left

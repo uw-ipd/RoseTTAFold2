@@ -110,12 +110,12 @@ class MSAPairStr2MSA(nn.Module):
         state = self.norm_state(state)
         state = self.proj_state(state).reshape(B, 1, L, -1)
         if self.training:
-            msa = msa + msa.index_add(1, torch.tensor([0,], device=state.device), state)
+            msa = msa + msa.index_add(1, torch.tensor([0,], device=state.device), state.to(msa.dtype))
             msa = msa + self.drop_row(self.row_attn(msa, pair, stride_msarow_n, stride_msarow_l))
             msa = msa + self.col_attn(msa, stride_msacol)
             msa = msa + self.ff(msa, stride_ff_m2m)
         else:
-            msa.index_add_(1, torch.tensor([0,], device=state.device), state)
+            msa.index_add_(1, torch.tensor([0,], device=state.device), state.to(msa.dtype))
             msa += self.drop_row(self.row_attn(msa, pair, stride_msarow_n, stride_msarow_l))
             msa += self.col_attn(msa, stride_msacol)
             msa += self.ff(msa, stride_ff_m2m)
@@ -547,6 +547,7 @@ class Str2Str(nn.Module):
                 node[:,rows] = self.norm_node(node_i)
         else:
             seq = self.norm_msa(msa[:,0])
+            state = self.norm_state(state)
             node = self.embed_node1(seq) + self.embed_node2(state)
             node = node + self.ff_node(node)
             node = self.norm_node(node)

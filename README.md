@@ -1,6 +1,9 @@
 # RF2
 GitHub repo for RoseTTAFold2
 
+Update May 8, 2024:
+- Option for density map input
+
 Update Apr 12, 2024:
 - Updated config file
 - Better memory efficiency during inference
@@ -60,29 +63,10 @@ conda activate RF2
 cd example
 ```
 
-### Example 1: predicting the structure of a monomer
+### Example: predicting the structure of a monomer in density
+Download and unzip emd_36027: https://files.wwpdb.org/pub/emdb/structures/EMD-36027/map/emd_36027.map.gz
 ```
-../run_RF2.sh rcsb_pdb_7UGF.fasta -o 7UGF
-```
-
-### Example 2: predicting the structure of a heterodimer with paired MSA
-```
-../run_RF2.sh rcsb_pdb_8HBN.fasta --pair -o 8HBN
-```
-
-### Example 3: predicting the structure of a heterotrimer with paired MSA
-```
-../run_RF2.sh rcsb_pdb_7ZLR.fasta --pair -o 7ZLR
-```
-
-### Example 4: predicting the structure of a C6-symmetric homodimer
-```
-../run_RF2.sh rcsb_pdb_7YTB.fasta --symm C6 -o 7YTB
-```
-
-### Example 5: predicting the structure of a C3-symmetric heterodimer (A<sub>3</sub>B<sub>3</sub> complex) with paired MSA
-```
-../run_RF2.sh rcsb_pdb_7LAW.fasta --symm C3 --pair -o 7LAW
+../run_RF2.sh rcsb_pdb_8J75.fasta -o 8J75 -m emd_36027.map
 ```
 
 ### Expected outputs
@@ -99,4 +83,5 @@ Options:
                               Understands Cn, Dn, T, I, O (with n an integer).
      -p|--pair: If more than one chain is provided, pair MSAs based on taxonomy ID.
      -h|--hhpred: Run hhpred to generate templates
+     -m|--mapfile: Input electron density map
 ```

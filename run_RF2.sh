@@ -57,12 +57,13 @@ hhpred=0
 fastas=()
 
 ## parse command line
-USAGESTRING="Usage: $(basename $0) [-o|--outdir name] [-s|--symm symmgroup] [-p|--pair] [-h|--hhpred] input1.fasta ... inputN.fasta"
-VALID_ARGS=$(getopt -o o:s:ph --long help,outdir:,symm:,pair,hhpred -- "$@")
+USAGESTRING="Usage: $(basename $0) [-o|--outdir name] [-s|--symm symmgroup] [-m|--mapfile mapfile] [-p|--pair] [-h|--hhpred] input1.fasta ... inputN.fasta"
+VALID_ARGS=$(getopt -o m:o:s:ph --long help,mapfile:,outdir:,symm:,pair,hhpred -- "$@")
 if [[ $? -ne 0 ]]; then
     exit 1;
 fi
 eval set -- "$VALID_ARGS"
+MAP="None"
 while [ : ]; do
   case "$1" in
     --help)
@@ -89,6 +90,10 @@ while [ : ]; do
         ;;
     -o | --outdir)
         WDIR="$2"
+        shift 2
+        ;;
+    -m | --mapfile)
+        MAP="$2"
         shift 2
         ;;
     --)
@@ -145,7 +150,7 @@ fi
 # end-to-end prediction
 echo "Running RoseTTAFold2 to predict structures"
 
-echo " -> Running command: python $PIPEDIR/network/predict.py -inputs $argstring -prefix $WDIR/models/model -model $PIPEDIR/network/weights/RF2_apr23.pt -db $HHDB -symm $symm"
+echo " -> Running command: python $PIPEDIR/network/predict.py -inputs $argstring -prefix $WDIR/models/model -model $PIPEDIR/network/weights/RF2_jan24.pt -db $HHDB -symm $symm -mapfile $MAP"
 mkdir -p $WDIR/models
 
 python $PIPEDIR/network/predict.py \
@@ -153,6 +158,7 @@ python $PIPEDIR/network/predict.py \
     -prefix $WDIR/models/model \
     -model $PIPEDIR/network/weights/RF2_apr23.pt \
     -db $HHDB \
+    -mapfile $MAP \
     -symm $symm #2> $WDIR/log/network.stderr 1> $WDIR/log/network.stdout 
 
 echo "Done"

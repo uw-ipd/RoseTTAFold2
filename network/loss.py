@@ -201,8 +201,8 @@ def resolve_symmetry_predictions(pred, true, mask, Lasu):
     Ltrue = true.shape[1]
     Opred = Lpred//Lasu
     Otrue = Ltrue//Lasu
-    if (Opred < Otrue):
-        print (Opred,Otrue,Lpred,Ltrue,Lasu)
+
+    pred = pred.float()
 
     # U[i] rotates layer i pred to native[0]
     r, U, cP, cT = calc_rmsd(pred[:,:,:Lasu].detach(), true[:,:Lasu], mask[:,:Lasu]) # no grads through RMSd

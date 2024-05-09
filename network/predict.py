@@ -35,6 +35,7 @@ def get_args():
          "   C = hhpred atab file\n"
          "Spaces seperate multiple inputs.  The last two arguments may be omitted\n",
          required=True, nargs='+')
+    parser.add_argument("-mapfile", default=None, type=str, help="Electron density map.")
     parser.add_argument("-db", help="HHpred database location", default=None)
     parser.add_argument("-prefix", default="S", type=str, help="Output file prefix [S]")
     parser.add_argument("-symm", default="C1", help="Symmetry group (Cn,Dn,T,O, or I).  If provided, 'input' should cover the asymmetric unit. [C1]")
@@ -48,6 +49,7 @@ def get_args():
     parser.add_argument("-nseqs_full", default=2048, type=int, help="The number of MSA sequences to sample in the wide-MSA 1D track [2048].")
     args = parser.parse_args()
     return args
+
 
 MODEL_PARAM ={
         "n_extra_block"   : 4,
@@ -248,7 +250,7 @@ class Predictor():
         return True
 
     def predict(
-        self, inputs, out_prefix, symm="C1", ffdb=None,
+        self, inputs, out_prefix, symm="C1", mapfile=None, ffdb=None,
         n_recycles=4, n_models=1, subcrop=-1, topk=-1, low_vram=False, nseqs=256, nseqs_full=2048,
         n_templ=4, msa_mask=0.0, is_training=False, msa_concat_mode="diag"
     ):
@@ -425,7 +427,7 @@ class Predictor():
                 msa_orig, ins_orig, 
                 t1d, xyz_t, alpha_t, mask_t_2d, 
                 xyz_prev, mask_prev, same_chain, idx_pdb,
-                symmids, symmsub, symmRs, symmmeta,  Ls, 
+                symmids, symmsub, symmRs, symmmeta,  Ls, mapfile, 
                 n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram,
                 "%s_%02d"%(out_prefix, i_trial),
                 msa_mask=msa_mask
@@ -439,7 +441,7 @@ class Predictor():
         self, msa_orig, ins_orig, 
         t1d, xyz_t, alpha_t, mask_t, 
         xyz_prev, mask_prev, same_chain, idx_pdb, 
-        symmids, symmsub, symmRs, symmmeta, L_s, 
+        symmids, symmsub, symmRs, symmmeta, L_s, mapfile, 
         n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram, out_prefix,
         msa_mask=0.0,
     ):
@@ -590,14 +592,19 @@ class Predictor():
                 Lstartj += lj
             Lstarti += li
 
-        util.writepdb("%s_pred.pdb"%(out_prefix), best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
+        outfile = "%s_pred.pdb"%(out_prefix)
+        util.writepdb(outfile, best_xyzfull[0], seq_full[0], L_s, bfacts=100*best_lddtfull[0])
+
+        print (mapfile)
+        if mapfile is not None and mapfile != "None":
+            from density import rosetta_density_dock
+            rosetta_density_dock(outfile,mapfile)
 
         prob_s = [prob.permute(0,2,3,1).detach().cpu().numpy().astype(np.float16) for prob in prob_s]
         np.savez_compressed("%s.npz"%(out_prefix),
             dist=prob_s[0].astype(np.float16),
             lddt=best_lddt[0].detach().cpu().numpy().astype(np.float16),
             pae=best_pae[0].detach().cpu().numpy().astype(np.float16))
-
 
 
 if __name__ == "__main__":
@@ -629,5 +636,6 @@ if __name__ == "__main__":
         low_vram=args.low_vram, 
         nseqs=args.nseqs, 
         nseqs_full=args.nseqs_full, 
+        mapfile=args.mapfile, 
         ffdb=ffdb)
 

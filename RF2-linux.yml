@@ -6,6 +6,7 @@ channels:
   - conda-forge
   - bioconda
   - pyg
+  - http://conda.rosettacommons.org
   - dglteam/label/cu121
 dependencies:
   - python=3.10
@@ -17,3 +18,4 @@ dependencies:
   - pandas
   - pyg
   - hhsuite
+  - pyrosetta

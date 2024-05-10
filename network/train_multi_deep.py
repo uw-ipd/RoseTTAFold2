@@ -27,7 +27,7 @@ torch.autograd.set_detect_anomaly(True)
 
 USE_AMP = True
 
-N_PRINT_TRAIN = 1
+N_PRINT_TRAIN = 4
 #BATCH_SIZE = 1 * torch.cuda.device_count()
 
 # num structs per epoch
@@ -921,12 +921,12 @@ class Trainer():
                             pred_prev_s.append(pred_all.detach())
                             continue
                         
-                        loss, lddt_s, loss_s, acc_s = self._get_loss_and_misc(output_i,
-                                                    true_crds, mask_crds, network_input['same_chain'],
-                                                    msa[:,i_cycle], mask_msa[:,i_cycle],
-                                                    network_input['idx'],
-                                                    unclamp, negative, symmRs, Lasu,
-                                                    pred_prev_s)
+                loss, lddt_s, loss_s, acc_s = self._get_loss_and_misc(output_i,
+                                            true_crds, mask_crds, network_input['same_chain'],
+                                            msa[:,i_cycle], mask_msa[:,i_cycle],
+                                            network_input['idx'],
+                                            unclamp, negative, symmRs, Lasu,
+                                            pred_prev_s)
                 
                 valid_tot += loss.detach()
                 if valid_loss == None:
@@ -1009,28 +1009,28 @@ class Trainer():
                             pred_prev_s.append(pred_all.detach())
                             continue
 
-                        loss, lddt_s, loss_s, acc_s, cnt_pred, cnt_ref = self._get_loss_and_misc(output_i,
-                                                                                true_crds, mask_crds, network_input['same_chain'],
-                                                                                msa[:,i_cycle], mask_msa[:,i_cycle],
-                                                                                network_input['idx'],
-                                                                                unclamp, negative, symmRs, Lasu, pred_prev_s,
-                                                                                return_cnt=True)
+                loss, lddt_s, loss_s, acc_s, cnt_pred, cnt_ref = self._get_loss_and_misc(output_i,
+                                                                        true_crds, mask_crds, network_input['same_chain'],
+                                                                        msa[:,i_cycle], mask_msa[:,i_cycle],
+                                                                        network_input['idx'],
+                                                                        unclamp, negative, symmRs, Lasu, pred_prev_s,
+                                                                        return_cnt=True)
                 
-                        # inter-chain contact prob
-                        cnt_pred = cnt_pred * (1-network_input['same_chain']).float()
-                        cnt_ref = cnt_ref * (1-network_input['same_chain']).float()
-                        max_prob = cnt_pred.max()
-                        if max_prob > 0.5:
-                            if (cnt_ref > 0).any():
-                                TP += 1.0
-                            else:
-                                FP += 1.0
-                        else:
-                            if (cnt_ref > 0).any():
-                                FN += 1.0
-                            else:
-                                TN += 1.0
-                        inter_s = torch.tensor([TP, FP, TN, FN], device=cnt_pred.device).float()
+                # inter-chain contact prob
+                cnt_pred = cnt_pred * (1-network_input['same_chain']).float()
+                cnt_ref = cnt_ref * (1-network_input['same_chain']).float()
+                max_prob = cnt_pred.max()
+                if max_prob > 0.5:
+                    if (cnt_ref > 0).any():
+                        TP += 1.0
+                    else:
+                        FP += 1.0
+                else:
+                    if (cnt_ref > 0).any():
+                        FN += 1.0
+                    else:
+                        TN += 1.0
+                inter_s = torch.tensor([TP, FP, TN, FN], device=cnt_pred.device).float()
 
                 valid_tot += loss.detach()
                 if valid_loss == None:
@@ -1103,27 +1103,27 @@ class Trainer():
                             pred_prev_s.append(pred_all.detach())
                             continue
 
-                        loss, lddt_s, loss_s, acc_s, cnt_pred, cnt_ref = self._get_loss_and_misc(output_i,
-                                                                                true_crds, mask_crds, network_input['same_chain'],
-                                                                                msa[:,i_cycle], mask_msa[:,i_cycle],
-                                                                                network_input['idx'],
-                                                                                unclamp, negative, symmRs, Lasu, pred_prev_s,
-                                                                                return_cnt=True)
-                        # inter-chain contact prob
-                        cnt_pred = cnt_pred * (1-network_input['same_chain']).float()
-                        cnt_ref = cnt_ref * (1-network_input['same_chain']).float()
-                        max_prob = cnt_pred.max()
-                        if max_prob > 0.5:
-                            if (cnt_ref > 0).any():
-                                TP += 1.0
-                            else:
-                                FP += 1.0
-                        else:
-                            if (cnt_ref > 0).any():
-                                FN += 1.0
-                            else:
-                                TN += 1.0
-                        inter_s = torch.tensor([TP, FP, TN, FN], device=cnt_pred.device).float()
+                loss, lddt_s, loss_s, acc_s, cnt_pred, cnt_ref = self._get_loss_and_misc(output_i,
+                                                                        true_crds, mask_crds, network_input['same_chain'],
+                                                                        msa[:,i_cycle], mask_msa[:,i_cycle],
+                                                                        network_input['idx'],
+                                                                        unclamp, negative, symmRs, Lasu, pred_prev_s,
+                                                                        return_cnt=True)
+                # inter-chain contact prob
+                cnt_pred = cnt_pred * (1-network_input['same_chain']).float()
+                cnt_ref = cnt_ref * (1-network_input['same_chain']).float()
+                max_prob = cnt_pred.max()
+                if max_prob > 0.5:
+                    if (cnt_ref > 0).any():
+                        TP += 1.0
+                    else:
+                        FP += 1.0
+                else:
+                    if (cnt_ref > 0).any():
+                        FN += 1.0
+                    else:
+                        TN += 1.0
+                inter_s = torch.tensor([TP, FP, TN, FN], device=cnt_pred.device).float()
 
                 valid_tot += loss.detach()
                 if valid_loss == None:

@@ -90,7 +90,7 @@ def rbf(D, D_min=0.0, D_count=64, D_sigma=0.5):
     RBF = torch.exp(-((D_expand - D_mu) / D_sigma)**2)
     return RBF
 
-def get_seqsep(idx):
+def get_seqsep(idx, nc_cycle=False):
     '''
     Input:
         - idx: residue indices of given sequence (B,L)
@@ -98,7 +98,12 @@ def get_seqsep(idx):
         - seqsep: sequence separation feature with sign (B, L, L, 1)
                   Sergey found that having sign in seqsep features helps a little
     '''
+    L = idx.shape[1]
     seqsep = idx[:,None,:] - idx[:,:,None]
+    if nc_cycle:
+        seqsep = (seqsep+L//2)%L-L//2
+    #print ('c', seqsep[0])
+
     sign = torch.sign(seqsep)
     neigh = torch.abs(seqsep)
     neigh[neigh > 1] = 0.0 # if bonded -- 1.0 / else 0.0
@@ -352,13 +357,13 @@ class ComputeAllAtomCoords(nn.Module):
         NCr = 0.5*(basexyzs[:,:,2,:3]+basexyzs[:,:,0,:3])
         CAr = (basexyzs[:,:,1,:3])
         CBr = (basexyzs[:,:,4,:3])
-        CBrotaxis1 = (CBr-CAr).cross(NCr-CAr)
+        CBrotaxis1 = (CBr-CAr).cross(NCr-CAr, dim=-1)
         CBrotaxis1 /= torch.linalg.norm(CBrotaxis1, dim=-1, keepdim=True)+1e-8
         
         # CB twist
         NCp = basexyzs[:,:,2,:3] - basexyzs[:,:,0,:3]
         NCpp = NCp - torch.sum(NCp*NCr, dim=-1, keepdim=True)/ torch.sum(NCr*NCr, dim=-1, keepdim=True) * NCr
-        CBrotaxis2 = (CBr-CAr).cross(NCpp)
+        CBrotaxis2 = (CBr-CAr).cross(NCpp, dim=-1)
         CBrotaxis2 /= torch.linalg.norm(CBrotaxis2, dim=-1, keepdim=True)+1e-8
         
         CBrot1 = make_rot_axis(alphas[:,:,7,:], CBrotaxis1 )
@@ -454,7 +459,7 @@ class XYZConverter(nn.Module):
         # CB twist
         NCp = basexyzs[:,:,2,:3] - basexyzs[:,:,0,:3]
         NCpp = NCp - torch.sum(NCp*NCr, dim=-1, keepdim=True)/ torch.sum(NCr*NCr, dim=-1, keepdim=True) * NCr
-        CBrotaxis2 = (CBr-CAr).cross(NCpp)
+        CBrotaxis2 = (CBr-CAr).cross(NCpp, dim=-1)
         CBrotaxis2 /= torch.linalg.norm(CBrotaxis2, dim=-1, keepdim=True)+1e-8
         
         CBrot1 = make_rot_axis(alphas[:,:,7,:], CBrotaxis1 )

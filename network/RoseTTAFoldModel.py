@@ -53,7 +53,7 @@ class RoseTTAFoldModule(nn.Module):
                 t1d=None, t2d=None, xyz_t=None, alpha_t=None, mask_t=None, same_chain=None,
                 msa_prev=None, pair_prev=None, state_prev=None, mask_recycle=None,
                 return_raw=False, return_full=False,
-                use_checkpoint=False, p2p_crop=-1, topk_crop=-1,
+                use_checkpoint=False, p2p_crop=-1, topk_crop=-1, nc_cycle=False, 
                 symmids=None, symmsub=None, symmRs=None, symmmeta=None,
                 striping=None, low_vram=False):
         if symmids is None:
@@ -68,7 +68,7 @@ class RoseTTAFoldModule(nn.Module):
             msa_stripe = -1
         else:
             msa_stripe = striping['msa_emb']
-        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, stride=msa_stripe)
+        msa_latent, pair, state = self.latent_emb(msa_latent, seq, idx, stride=msa_stripe, nc_cycle=nc_cycle)
         msa_latent, pair, state = (
           msa_latent.to(dtype), pair.to(dtype), state.to(dtype)
         )
@@ -116,7 +116,7 @@ class RoseTTAFoldModule(nn.Module):
             seq, msa_latent, msa_full, pair, xyz[:,:,:3], state, idx, 
             striping, symmids, symmsub, symmRs, symmmeta,
             use_checkpoint=use_checkpoint, p2p_crop=p2p_crop, topk_crop=topk_crop, 
-            low_vram=low_vram
+            low_vram=low_vram, nc_cycle=nc_cycle
         )
 
         if return_raw:

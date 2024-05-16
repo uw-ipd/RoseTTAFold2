@@ -55,7 +55,6 @@ class SE3TransformerWrapper(nn.Module):
         self.reset_parameter()
 
     def reset_parameter(self):
-
         # make sure linear layer before ReLu are initialized with kaiming_normal_
         for n, p in self.se3.named_parameters():
             if "bias" in n:
@@ -72,14 +71,11 @@ class SE3TransformerWrapper(nn.Module):
                         nn.init.kaiming_normal_(p, nonlinearity='relu')
 
         ## make last layers to be zero-initialized
-        #nn.init.zeros_(self.se3.graph_modules[-1].project.weights['0'])
-        #if self.l1_out > 0:
-        #    nn.init.zeros_(self.se3.graph_modules[-1].project.weights['1'])
-        # make last layers to be zero-initialized
         nn.init.zeros_(self.se3.graph_modules[-1].weights['0'])
         if self.l1_out > 0:
             nn.init.zeros_(self.se3.graph_modules[-1].weights['1'])
 
+    @torch.cuda.amp.autocast(enabled=False)
     def forward(self, G, type_0_features, type_1_features=None, edge_features=None):
         if self.l1_in > 0:
             node_features = {'0': type_0_features, '1': type_1_features}

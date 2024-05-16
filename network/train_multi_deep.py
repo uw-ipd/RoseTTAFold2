@@ -23,16 +23,16 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 torch.backends.cudnn.benchmark = False
 torch.backends.cudnn.deterministic = True
 
-#torch.autograd.set_detect_anomaly(True)
+torch.autograd.set_detect_anomaly(True)
 
-USE_AMP = False
+USE_AMP = True
 
-N_PRINT_TRAIN = 1
+N_PRINT_TRAIN = 4
 #BATCH_SIZE = 1 * torch.cuda.device_count()
 
 # num structs per epoch
 # must be divisible by #GPUs
-N_EXAMPLE_PER_EPOCH = 3*3200
+N_EXAMPLE_PER_EPOCH = 4*3200
 
 
 LOAD_PARAM = {'shuffle': False,
@@ -204,7 +204,7 @@ class Trainer():
         mask_clash = (lj_nat < clashcut) * mask_BB[0] # if False, the residue has clash (L)
         xs_mask[:,:,5:] *= mask_clash.view(1,L,1) # ignore clashed side-chains
         
-        # col 5: experimentally resolved prediction loss
+        # experimentally resolved prediction loss
         loss = nn.BCEWithLogitsLoss()(logit_exp, mask_BB.float())
         tot_loss += w_exp*loss
         loss_s.append(loss[None].detach())
@@ -454,7 +454,7 @@ class Trainer():
         #
         train_sampler = DistributedWeightedSampler(train_set, pdb_weights, compl_weights, neg_weights, fb_weights, 
                                                    num_example_per_epoch=N_EXAMPLE_PER_EPOCH,
-                                                   num_replicas=world_size, rank=rank, fraction_fb=0.0, fraction_compl=0.0)
+                                                   num_replicas=world_size, rank=rank, fraction_fb=0.0, fraction_compl=0.25)
         valid_pdb_sampler = data.distributed.DistributedSampler(valid_pdb_set, num_replicas=world_size, rank=rank)
         valid_homo_sampler = data.distributed.DistributedSampler(valid_homo_set, num_replicas=world_size, rank=rank)
         valid_compl_sampler = data.distributed.DistributedSampler(valid_compl_set, num_replicas=world_size, rank=rank)
@@ -481,16 +481,13 @@ class Trainer():
         model = EMA(RoseTTAFoldModule(**self.model_param).to(gpu), 0.99)
 
         ddp_model = DDP(model, device_ids=[gpu], find_unused_parameters=False)
-        #ddp_model._set_static_graph() # required to use gradient checkpointing w/ shared parameters
         if rank == 0:
             print ("# of parameters:", count_parameters(ddp_model))
         
         # define optimizer and scheduler
         opt_params = add_weight_decay(ddp_model, self.l2_coeff)
-        #optimizer = torch.optim.Adam(opt_params, lr=self.init_lr)
         optimizer = torch.optim.AdamW(opt_params, lr=self.init_lr)
-        #scheduler = get_stepwise_decay_schedule_with_warmup(optimizer, 1000, 15000, 0.95)
-        scheduler = get_stepwise_decay_schedule_with_warmup(optimizer, 0, 10000, 0.95)
+        scheduler = get_stepwise_decay_schedule_with_warmup(optimizer, 1000, 15000, 0.95)
         scaler = torch.cuda.amp.GradScaler(enabled=USE_AMP)
        
         # load model
@@ -501,14 +498,6 @@ class Trainer():
             DDP_cleanup()
             return
         
-        #valid_pdb_sampler.set_epoch(0)
-        #valid_homo_sampler.set_epoch(0)
-        #valid_compl_sampler.set_epoch(0)
-        #valid_neg_sampler.set_epoch(0)
-        #valid_tot, valid_loss, valid_acc = self.valid_pdb_cycle(ddp_model, valid_pdb_loader, rank, gpu, world_size, loaded_epoch)
-        #_, _, _ = self.valid_pdb_cycle(ddp_model, valid_homo_loader, rank, gpu, world_size, loaded_epoch, header="Homo")
-        #_, _, _ = self.valid_ppi_cycle(ddp_model, valid_compl_loader, valid_neg_loader, rank, gpu, world_size, loaded_epoch)
-
         for epoch in range(loaded_epoch+1, self.n_epoch):
             train_sampler.set_epoch(epoch)
             valid_pdb_sampler.set_epoch(epoch)
@@ -685,7 +674,17 @@ class Trainer():
                            msa, mask_msa, idx_pdb, unclamp, negative, symmRs, Lasu,
                            pred_prev_s=None, return_cnt=False):
         logit_s, logit_aa_s, logit_exp, logit_pae, p_bind, pred_crds, alphas, symmsubs, pred_lddts, _, _, _ = output_i
-            
+
+        # to float
+        logit_s = tuple(x.float() for x in logit_s)
+        logit_aa_s = logit_aa_s.float()
+        logit_exp = logit_exp.float()
+        logit_pae = logit_pae.float()
+        p_bind = p_bind.float()
+        pred_crds = pred_crds.float()
+        alphas = alphas.float()
+        pred_lddts = pred_lddts.float()
+
         if (symmRs is not None):
             #print ('a', pred_crds.shape, true_crds.shape, mask_crds.shape)
             ###
@@ -782,11 +781,11 @@ class Trainer():
                     if i_cycle < N_cycle -1:
                         stack.enter_context(torch.no_grad())
                         stack.enter_context(ddp_model.no_sync())
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         return_raw=True
                         use_checkpoint=False
                     else:
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         return_raw=False
                         use_checkpoint=True
                     
@@ -794,14 +793,12 @@ class Trainer():
 
                     output_i = ddp_model(**input_i)
                     
-                    if i_cycle < N_cycle - 1:
-                        continue
-
-                    loss, _, loss_s, acc_s = self._get_loss_and_misc(output_i,
-                                               true_crds, mask_crds, network_input['same_chain'],
-                                               msa[:,i_cycle], mask_msa[:,i_cycle],
-                                               network_input['idx'],
-                                               unclamp, negative, symmRs, Lasu)
+            # loss calcs do not use AMP
+            loss, _, loss_s, acc_s = self._get_loss_and_misc(output_i,
+                                       true_crds, mask_crds, network_input['same_chain'],
+                                       msa[:,i_cycle], mask_msa[:,i_cycle],
+                                       network_input['idx'],
+                                       unclamp, negative, symmRs, Lasu)
 
             loss = loss / self.ACCUM_STEP
             scaler.scale(loss).backward()
@@ -905,7 +902,7 @@ class Trainer():
                 pred_prev_s = list()
                 for i_cycle in range(N_cycle):
                     with ExitStack() as stack:
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         stack.enter_context(ddp_model.no_sync())
                         use_checkpoint=False
                         if i_cycle < N_cycle -1:
@@ -924,12 +921,12 @@ class Trainer():
                             pred_prev_s.append(pred_all.detach())
                             continue
                         
-                        loss, lddt_s, loss_s, acc_s = self._get_loss_and_misc(output_i,
-                                                    true_crds, mask_crds, network_input['same_chain'],
-                                                    msa[:,i_cycle], mask_msa[:,i_cycle],
-                                                    network_input['idx'],
-                                                    unclamp, negative, symmRs, Lasu,
-                                                    pred_prev_s)
+                loss, lddt_s, loss_s, acc_s = self._get_loss_and_misc(output_i,
+                                            true_crds, mask_crds, network_input['same_chain'],
+                                            msa[:,i_cycle], mask_msa[:,i_cycle],
+                                            network_input['idx'],
+                                            unclamp, negative, symmRs, Lasu,
+                                            pred_prev_s)
                 
                 valid_tot += loss.detach()
                 if valid_loss == None:
@@ -994,7 +991,7 @@ class Trainer():
                 pred_prev_s = list()
                 for i_cycle in range(N_cycle): 
                     with ExitStack() as stack:
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         stack.enter_context(ddp_model.no_sync())
                         use_checkpoint=False
                         if i_cycle < N_cycle - 1:
@@ -1012,28 +1009,28 @@ class Trainer():
                             pred_prev_s.append(pred_all.detach())
                             continue
 
-                        loss, lddt_s, loss_s, acc_s, cnt_pred, cnt_ref = self._get_loss_and_misc(output_i,
-                                                                                true_crds, mask_crds, network_input['same_chain'],
-                                                                                msa[:,i_cycle], mask_msa[:,i_cycle],
-                                                                                network_input['idx'],
-                                                                                unclamp, negative, symmRs, Lasu, pred_prev_s,
-                                                                                return_cnt=True)
+                loss, lddt_s, loss_s, acc_s, cnt_pred, cnt_ref = self._get_loss_and_misc(output_i,
+                                                                        true_crds, mask_crds, network_input['same_chain'],
+                                                                        msa[:,i_cycle], mask_msa[:,i_cycle],
+                                                                        network_input['idx'],
+                                                                        unclamp, negative, symmRs, Lasu, pred_prev_s,
+                                                                        return_cnt=True)
                 
-                        # inter-chain contact prob
-                        cnt_pred = cnt_pred * (1-network_input['same_chain']).float()
-                        cnt_ref = cnt_ref * (1-network_input['same_chain']).float()
-                        max_prob = cnt_pred.max()
-                        if max_prob > 0.5:
-                            if (cnt_ref > 0).any():
-                                TP += 1.0
-                            else:
-                                FP += 1.0
-                        else:
-                            if (cnt_ref > 0).any():
-                                FN += 1.0
-                            else:
-                                TN += 1.0
-                        inter_s = torch.tensor([TP, FP, TN, FN], device=cnt_pred.device).float()
+                # inter-chain contact prob
+                cnt_pred = cnt_pred * (1-network_input['same_chain']).float()
+                cnt_ref = cnt_ref * (1-network_input['same_chain']).float()
+                max_prob = cnt_pred.max()
+                if max_prob > 0.5:
+                    if (cnt_ref > 0).any():
+                        TP += 1.0
+                    else:
+                        FP += 1.0
+                else:
+                    if (cnt_ref > 0).any():
+                        FN += 1.0
+                    else:
+                        TN += 1.0
+                inter_s = torch.tensor([TP, FP, TN, FN], device=cnt_pred.device).float()
 
                 valid_tot += loss.detach()
                 if valid_loss == None:
@@ -1089,7 +1086,7 @@ class Trainer():
                 pred_prev_s = list()
                 for i_cycle in range(N_cycle): 
                     with ExitStack() as stack:
-                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP))
+                        stack.enter_context(torch.cuda.amp.autocast(enabled=USE_AMP, dtype=torch.bfloat16))
                         stack.enter_context(ddp_model.no_sync())
                         if i_cycle < N_cycle - 1:
                             return_raw=True
@@ -1106,27 +1103,27 @@ class Trainer():
                             pred_prev_s.append(pred_all.detach())
                             continue
 
-                        loss, lddt_s, loss_s, acc_s, cnt_pred, cnt_ref = self._get_loss_and_misc(output_i,
-                                                                                true_crds, mask_crds, network_input['same_chain'],
-                                                                                msa[:,i_cycle], mask_msa[:,i_cycle],
-                                                                                network_input['idx'],
-                                                                                unclamp, negative, symmRs, Lasu, pred_prev_s,
-                                                                                return_cnt=True)
-                        # inter-chain contact prob
-                        cnt_pred = cnt_pred * (1-network_input['same_chain']).float()
-                        cnt_ref = cnt_ref * (1-network_input['same_chain']).float()
-                        max_prob = cnt_pred.max()
-                        if max_prob > 0.5:
-                            if (cnt_ref > 0).any():
-                                TP += 1.0
-                            else:
-                                FP += 1.0
-                        else:
-                            if (cnt_ref > 0).any():
-                                FN += 1.0
-                            else:
-                                TN += 1.0
-                        inter_s = torch.tensor([TP, FP, TN, FN], device=cnt_pred.device).float()
+                loss, lddt_s, loss_s, acc_s, cnt_pred, cnt_ref = self._get_loss_and_misc(output_i,
+                                                                        true_crds, mask_crds, network_input['same_chain'],
+                                                                        msa[:,i_cycle], mask_msa[:,i_cycle],
+                                                                        network_input['idx'],
+                                                                        unclamp, negative, symmRs, Lasu, pred_prev_s,
+                                                                        return_cnt=True)
+                # inter-chain contact prob
+                cnt_pred = cnt_pred * (1-network_input['same_chain']).float()
+                cnt_ref = cnt_ref * (1-network_input['same_chain']).float()
+                max_prob = cnt_pred.max()
+                if max_prob > 0.5:
+                    if (cnt_ref > 0).any():
+                        TP += 1.0
+                    else:
+                        FP += 1.0
+                else:
+                    if (cnt_ref > 0).any():
+                        FN += 1.0
+                    else:
+                        TN += 1.0
+                inter_s = torch.tensor([TP, FP, TN, FN], device=cnt_pred.device).float()
 
                 valid_tot += loss.detach()
                 if valid_loss == None:

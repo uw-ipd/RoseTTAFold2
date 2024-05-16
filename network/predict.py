@@ -46,6 +46,7 @@ def get_args():
     parser.add_argument("-low_vram", default=False, help="Offload some computations to CPU to allow larger systems in low VRAM. [False]", action='store_true')
     parser.add_argument("-nseqs", default=256, type=int, help="The number of MSA sequences to sample in the main 1D track [256].")
     parser.add_argument("-nseqs_full", default=2048, type=int, help="The number of MSA sequences to sample in the wide-MSA 1D track [2048].")
+    parser.add_argument("-cyclize", default=False, help="Model as N-C cyclized peptide", action='store_true')
     args = parser.parse_args()
     return args
 
@@ -250,7 +251,7 @@ class Predictor():
     def predict(
         self, inputs, out_prefix, symm="C1", ffdb=None,
         n_recycles=4, n_models=1, subcrop=-1, topk=-1, low_vram=False, nseqs=256, nseqs_full=2048,
-        n_templ=4, msa_mask=0.0, is_training=False, msa_concat_mode="diag"
+        n_templ=4, msa_mask=0.0, is_training=False, msa_concat_mode="diag", cyclize=False
     ):
         def to_ranges(txt):
             return [[int(x) for x in r.strip().split('-')]
@@ -323,7 +324,15 @@ class Predictor():
         ###
         # pass 2, templates
         L = sum(Ls)
-        xyz_t = INIT_CRDS.reshape(1,1,27,3).repeat(n_templ,L,1,1) + torch.rand(n_templ,L,1,3)*5.0 - 2.5
+        #xyz_t = INIT_CRDS.reshape(1,1,27,3).repeat(n_templ,L,1,1) + torch.rand(n_templ,L,1,3)*5.0 - 2.5
+        # dummy template
+        SYMM_OFFSET_SCALE = 1.0
+        xyz_t = (
+            INIT_CRDS.reshape(1,1,27,3).repeat(n_templ,L,1,1) 
+            + torch.rand(n_templ,L,1,3)*5.0 - 2.5
+            + SYMM_OFFSET_SCALE*symmoffset*L**(1/2)  # note: offset based on symmgroup
+        )
+
         mask_t = torch.full((n_templ, L, 27), False) 
         t1d = torch.nn.functional.one_hot(torch.full((n_templ, L), 20).long(), num_classes=21).float() # all gaps
         t1d = torch.cat((t1d, torch.zeros((n_templ,L,1)).float()), -1)
@@ -418,7 +427,7 @@ class Predictor():
                 t1d, xyz_t, alpha_t, mask_t_2d, 
                 xyz_prev, mask_prev, same_chain, idx_pdb,
                 symmids, symmsub, symmRs, symmmeta,  Ls, 
-                n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram,
+                n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram, cyclize,
                 "%s_%02d"%(out_prefix, i_trial),
                 msa_mask=msa_mask
             )
@@ -432,7 +441,7 @@ class Predictor():
         t1d, xyz_t, alpha_t, mask_t, 
         xyz_prev, mask_prev, same_chain, idx_pdb, 
         symmids, symmsub, symmRs, symmmeta, L_s, 
-        n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram, out_prefix,
+        n_recycles, nseqs, nseqs_full, subcrop, topk, low_vram, cyclize, out_prefix,
         msa_mask=0.0,
     ):
         self.xyz_converter = self.xyz_converter.to(self.device)
@@ -515,7 +524,8 @@ class Predictor():
                                                                symmsub=symmsub,
                                                                symmRs=symmRs,
                                                                symmmeta=symmmeta, 
-                                                               striping=STRIPE )
+                                                               striping=STRIPE,
+                                                               nc_cycle=cyclize )
                     alpha = alpha[-1].to(seq.device)
                     xyz_prev = xyz_prev[-1].to(seq.device)
                     _, xyz_prev = self.xyz_converter.compute_all_atom(seq, xyz_prev, alpha)
@@ -621,5 +631,6 @@ if __name__ == "__main__":
         low_vram=args.low_vram, 
         nseqs=args.nseqs, 
         nseqs_full=args.nseqs_full, 
+        cyclize=args.cyclize,
         ffdb=ffdb)
 

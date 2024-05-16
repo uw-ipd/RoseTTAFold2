@@ -32,7 +32,7 @@ def calc_rmsd(pred, true, mask):
     pred = pred - cP
     true = true - cT
     C = torch.einsum('bji,njk->bik', pred, true)
-    V, S, W = torch.svd(C)
+    V, S, W = torch.svd(C.float())
     d = torch.ones([N,3,3], device=pred.device)
     d[:,:,-1] = torch.sign(torch.det(V)*torch.det(W)).unsqueeze(1)
     U = torch.matmul(d*V, W.permute(0,2,1)) # (IB, 3, 3)

@@ -22,13 +22,15 @@ class PositionalEncoding2D(nn.Module):
         self.emb = nn.Embedding(self.nbin, d_model)
         self.d_out = d_model
     
-    def forward(self, idx, stride):
+    def forward(self, idx, stride, nc_cycle=False):
         B, L = idx.shape[:2]
 
         bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
 
         seqsep = torch.full((B,L,L),100, device=idx.device)
         seqsep[0] = idx[0,None,:] - idx[0,:,None] # (B, L, L)
+        if nc_cycle:
+            seqsep[0] = (seqsep[0] + L//2)%L - L//2
 
         # fd reduce memory in inference
         STRIDE = L
@@ -75,7 +77,7 @@ class MSA_emb(nn.Module):
 
         nn.init.zeros_(self.emb.bias)
 
-    def forward(self, msa, seq, idx, stride):
+    def forward(self, msa, seq, idx, stride, nc_cycle=None):
         # Inputs:
         #   - msa: Input MSA (B, N, L, d_init)
         #   - seq: Input Sequence (B, L)
@@ -95,7 +97,7 @@ class MSA_emb(nn.Module):
         left = self.emb_left(seq)[:,None] # (B, 1, L, d_pair)
         right = self.emb_right(seq)[:,:,None] # (B, L, 1, d_pair)
         pair = (left + right) # (B, L, L, d_pair)
-        pair += self.pos(idx, stride) # add relative position
+        pair += self.pos(idx, stride, nc_cycle) # add relative position
 
         # state embedding
         state = self.emb_state(seq) #.repeat(oligo,1,1)

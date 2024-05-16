@@ -1,6 +1,10 @@
 # RF2
 GitHub repo for RoseTTAFold2
 
+Update May 16, 2024:
+- Fixes for training
+- New option `-cyclize` for prediction of cyclic peptides
+
 Update Apr 12, 2024:
 - Updated config file
 - Better memory efficiency during inference

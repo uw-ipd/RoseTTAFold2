@@ -9,12 +9,106 @@ import gzip
 import torch
 from ffindex import *
 from chemical import INIT_CRDS
+import chemical
 
 to1letter = {
     "ALA":'A', "ARG":'R', "ASN":'N', "ASP":'D', "CYS":'C',
     "GLN":'Q', "GLU":'E', "GLY":'G', "HIS":'H', "ILE":'I',
     "LEU":'L', "LYS":'K', "MET":'M', "PHE":'F', "PRO":'P',
     "SER":'S', "THR":'T', "TRP":'W', "TYR":'Y', "VAL":'V' }
+
+def read_multichain_template_pdb(pdb_fn, target_chain=None, templ_from_nontgt=True):
+    print ('read_multichain_template_pdb',templ_from_nontgt)
+    # get full sequence from given PDB
+    seq_full = list()
+    L_s = list()
+    prev_chain=''
+    offset = 0
+    with open(pdb_fn) as fp:
+        for line in fp:
+            if line[:4] != "ATOM":
+                continue
+            if line[12:16].strip() != "CA":
+                continue
+            if line[21] != prev_chain:
+                if len(seq_full) > 0:
+                    L_s.append(len(seq_full)-offset)
+                    offset = len(seq_full)
+            prev_chain = line[21]
+            aa = line[17:20]
+            seq_full.append(chemical.aa2num[aa] if aa in chemical.aa2num.keys() else 20)
+    L_s.append(len(seq_full) - offset)
+
+    seq_full = torch.tensor(seq_full).long()
+    L = len(seq_full)
+    msa = torch.stack((seq_full,seq_full,seq_full), dim=0)
+    msa[1,:L_s[0]] = 20
+    msa[2,L_s[0]:] = 20
+    ins = torch.zeros_like(msa)
+
+    ntmpl=2
+    #xyz = torch.full((ntmpl, L, 27, 3), np.nan).float()
+    xyz = INIT_CRDS.reshape(1,1,27,3).repeat(ntmpl,L,1,1) + torch.rand(1,L,1,3)*5.0
+    mask = torch.full((ntmpl, L, 27), False)
+
+    seq = torch.full((ntmpl, L,), 20).long()
+    conf = torch.zeros(ntmpl, L,1).float()
+    is_tgt = torch.zeros((L), dtype=torch.bool)
+
+    if target_chain == None: # read all chains
+        import string
+        target_chain = string.ascii_uppercase + string.ascii_lowercase + ' 0123456789'
+
+    with open(pdb_fn) as fp:
+        for line in fp:
+            if line[:4] != "ATOM":
+                continue
+            outbatch = 0
+            if line[21] not in target_chain:
+                outbatch = 1
+
+            resNo, atom, aa = int(line[22:26]), line[12:16], line[17:20]
+            aa_idx = chemical.aa2num[aa] if aa in chemical.aa2num.keys() else 20
+
+            #
+            idx = resNo - 1
+            if outbatch==0:
+                is_tgt[idx] = True
+
+            for i_atm, tgtatm in enumerate(chemical.aa2long[aa_idx]):
+                if tgtatm == atom:
+                    xyz[outbatch, idx, i_atm, :] = torch.tensor([float(line[30:38]), float(line[38:46]), float(line[46:54])])
+                    mask[outbatch, idx, i_atm] = True
+                    break
+            seq[outbatch, idx] = aa_idx
+            #seq[:, idx] = aa_idx
+
+    for i in range(xyz.shape[0]):
+        if (mask[i].any()):
+            xyz[i] = center_and_realign_missing(xyz[i], mask[i])
+
+    CONF=0.5
+
+    dslf = get_dislf(seq[0:1], xyz[0], mask[0])
+    dslf = dslf + get_dislf(seq[1:], xyz[1], mask[1])
+
+    # assign confidence 'CONF' to all residues with backbone in template
+    conf = torch.where(mask[...,:3].all(dim=-1)[...,None], torch.full((2,L,1),CONF), torch.zeros(L,1)).float()
+
+    if (templ_from_nontgt and mask[1].any()):
+        # increase peptide confidence
+        nonterm = mask[1,:,0].nonzero()[:,0]
+        conf[1,nonterm,:] = CONF
+    else:
+        xyz = xyz[:1]
+        mask = mask[:1]
+        conf = conf[:1]
+        seq = seq[:1]
+
+    seq_1hot = torch.nn.functional.one_hot(seq, num_classes=21).float()
+    t1d = torch.cat((seq_1hot, conf), -1)
+
+    return msa, ins, L_s, xyz, mask, t1d, dslf[None,...], is_tgt
 
 # read A3M and convert letters into
 # integers in the 0..20 range,

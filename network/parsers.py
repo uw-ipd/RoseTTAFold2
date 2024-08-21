@@ -18,23 +18,18 @@ to1letter = {
     "SER":'S', "THR":'T', "TRP":'W', "TYR":'Y', "VAL":'V' }
 
 def get_dislf(seq, xyz, mask):
-    L = seq.shape[0]
-    resolved_cys_mask = ((seq==aa2num['CYS']) * mask[:,5]).nonzero().squeeze(-1)  # cys[5]=='sg'
+    L = seq.shape[1]
+    resolved_cys_mask = ((seq[0]==aa2num['CYS']) * mask[:,5]).nonzero()  # cys[5]=='sg'
     sgs = xyz[resolved_cys_mask,5]
-    ii,jj = torch.triu_indices(sgs.shape[0],sgs.shape[0],1)
-    d_sg_sg = torch.linalg.norm(sgs[ii,:]-sgs[jj,:], dim=-1)
-    is_dslf = (d_sg_sg>1.0)*(d_sg_sg<3.0)
+    d_sg_sg = torch.linalg.norm(sgs[:,None,:]-sgs[None,:,:], dim=-1)
+    dslf = torch.zeros([L,L,1])
+    dslf[resolved_cys_mask[:,None],resolved_cys_mask[None,:],0] = (
+        (d_sg_sg>1.9)*(d_sg_sg<2.1)
+    ).float()
 
-    dslf = []
-    for i in is_dslf.nonzero():
-        dslf.append( (
-            resolved_cys_mask[ii[i]].item(),
-            resolved_cys_mask[jj[i]].item(),
-        ) )
     return dslf
-
 def read_multichain_template_pdb(pdb_fn, target_chain=None, templ_from_nontgt=True):
-    print ('read_multichain_template_pdb',templ_from_nontgt)
+    #print ('read_multichain_template_pdb',templ_from_nontgt)
     # get full sequence from given PDB
     seq_full = list()
     L_s = list()

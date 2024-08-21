@@ -226,17 +226,19 @@ class Predictor():
                 msa_extra = msa_extra.unsqueeze(0)
 
                 with torch.cuda.amp.autocast(False):
-                    logit_s, logit_aa_s, _, logits_pae, xyz_prev, alpha, pred_lddt, msa_prev, pair_prev, state_prev = self.model(
+                    logit_s, logit_aa_s, _, logits_pae, _, xyz_prev, alpha, _, pred_lddt, msa_prev, pair_prev, state_prev = self.model(
                        msa_seed, msa_extra,
                        seq, xyz_prev, 
-                       idx_pdb, cyclize_reses,
+                       idx_pdb,
                        t1d=t1d, t2d=t2d, xyz_t=xyz_t,
                        alpha_t=alpha_t, mask_t=mask_t,
                        same_chain=same_chain,
                        msa_prev=msa_prev,
                        pair_prev=pair_prev,
                        state_prev=state_prev,
-                       mask_recycle=mask_recycle)
+                       mask_recycle=mask_recycle, 
+                       cyclize_reses=cyclize_reses
+                    )
 
                 alpha = alpha[-1]
                 xyz_prev = xyz_prev[-1]
@@ -361,5 +363,6 @@ if __name__ == "__main__":
     all_pdbs = glob.iglob(f'{args.pdb_dir}/*.pdb',recursive=True)
     for pdb_fn in all_pdbs:
         out_prefix = f'{args.out_path}/{Path(pdb_fn).stem}'
+        print (pdb_fn,out_prefix)
         pred = Predictor(model_name=args.model_name)
         pred.predict(pdb_fn, out_prefix, args.out_path, target_chain=args.target_chain, from_scratch=args.from_scratch, cyclic=args.cyclic)

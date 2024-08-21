@@ -22,15 +22,18 @@ class PositionalEncoding2D(nn.Module):
         self.emb = nn.Embedding(self.nbin, d_model)
         self.d_out = d_model
     
-    def forward(self, idx, stride, nc_cycle=False):
+    def forward(self, idx, stride, cyclize=None):
         B, L = idx.shape[:2]
 
         bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
 
         seqsep = torch.full((B,L,L),100, device=idx.device)
         seqsep[0] = idx[0,None,:] - idx[0,:,None] # (B, L, L)
-        if nc_cycle:
-            seqsep[0] = (seqsep[0] + L//2)%L - L//2
+        if cyclize is not None:
+            mask = cyclize[:,None]*cyclize[None,:]
+            ncyc = torch.sum(cyclize)
+            seqsep[:,mask*(seqsep[0]>ncyc//2)] -= ncyc
+            seqsep[:,mask*(seqsep[0]<-ncyc//2)] += ncyc
 
         # fd reduce memory in inference
         STRIDE = L
@@ -77,7 +80,7 @@ class MSA_emb(nn.Module):
 
         nn.init.zeros_(self.emb.bias)
 
-    def forward(self, msa, seq, idx, stride, nc_cycle=None):
+    def forward(self, msa, seq, idx, stride, cyclize_reses=None):
         # Inputs:
         #   - msa: Input MSA (B, N, L, d_init)
         #   - seq: Input Sequence (B, L)
@@ -97,7 +100,7 @@ class MSA_emb(nn.Module):
         left = self.emb_left(seq)[:,None] # (B, 1, L, d_pair)
         right = self.emb_right(seq)[:,:,None] # (B, L, 1, d_pair)
         pair = (left + right) # (B, L, L, d_pair)
-        pair += self.pos(idx, stride, nc_cycle) # add relative position
+        pair += self.pos(idx, stride, cyclize_reses) # add relative position
 
         # state embedding
         state = self.emb_state(seq) #.repeat(oligo,1,1)

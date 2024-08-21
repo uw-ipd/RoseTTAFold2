@@ -25,7 +25,7 @@ class SeqSep(nn.Module):
         self.nbin = abs(minpos)+maxpos+1
         self.emb = nn.Embedding(self.nbin, d_model)
     
-    def forward(self, idx, idx2=None, oligo=1, L=0, nc_cycle=False):
+    def forward(self, idx, idx2=None, oligo=1, L=0, cyclic=None):
         if idx2 is None:
             idx2 = idx
 
@@ -37,13 +37,17 @@ class SeqSep(nn.Module):
         bins = torch.arange(self.minpos, self.maxpos, device=idx.device)
         seqsep = torch.full((oligo,L1,L2), 100, dtype=idx.dtype, device=idx.device)
         seqsep[0] = idx2[:,None,:] - idx[:,:,None] # (B, L, L)
-        if nc_cycle:
-            seqsep[0] = (seqsep[0]+L//2)%L-L//2
+        if cyclic is not None:
+            mask = cyclic[:,None]*cyclic[None,:]
+            ncyc = torch.sum(cyclic)
+            seqsep[:,mask*(seqsep[0]>ncyc//2)] -= ncyc
+            seqsep[:,mask*(seqsep[0]<-ncyc//2)] += ncyc
 
         #
         ib = torch.bucketize(seqsep, bins).long() # (B, L, L)
         emb = self.emb(ib) #(B, L, L, d_model)
         return emb
+
 
 # Update MSA with biased self-attention. bias from Pair & Str
 class MSAPairStr2MSA(nn.Module):
@@ -530,7 +534,7 @@ class Str2Str(nn.Module):
         nn.init.zeros_(self.embed_edge2.bias)
     
     #@profile
-    def forward(self, msa, pair, R_in, T_in, xyz, state, idx_in, strides, top_k=64, eps=1e-5, nc_cycle=False):
+    def forward(self, msa, pair, R_in, T_in, xyz, state, idx_in, strides, top_k=64, eps=1e-5, cyclize_reses=None):
         B, N, L = msa.shape[:3]
 
         dtype = msa.dtype
@@ -562,7 +566,7 @@ class Str2Str(nn.Module):
         node = node.reshape(B*L, -1, 1)
 
         ## pair features
-        seqsep = get_seqsep(idx_in, nc_cycle)
+        seqsep = get_seqsep(idx_in, cyclize_reses)
 
         if STRIDE > 0 and STRIDE < L:
             edge = torch.zeros((B,L,L,self.n_edge), device=msa.device, dtype=msa.dtype)
@@ -647,13 +651,15 @@ class IterBlock(nn.Module):
         self, msa, pair, R_in, T_in, xyz, state, idx, 
         strides, symmids, symmsub_in, symmsub, symmRs, symmmeta, 
         use_checkpoint=False, topk=0, crop=-1,
-        low_vram=False, nc_cycle=False
+        low_vram=False, cyclize_reses=None
     ):
         B,L = pair.shape[:2]
 
         STRIDE = L
         if (strides is not None):
             STRIDE = strides['iter']
+        if cyclize_reses is not None:
+            STRIDE = L
 
         xyzfull = xyz.view(1,B*L,3,3)
         rbf_feat = torch.zeros((B,L,L,self.d_rbf), device=msa.device, dtype=msa.dtype)
@@ -664,7 +670,7 @@ class IterBlock(nn.Module):
                 NR, NC = rows.shape[0], cols.shape[0]
                 rbf_feat_ij = (
                   rbf(torch.cdist(xyz[:,rows,1], xyz[:,cols,1])).reshape(B,NR,NC,-1)
-                  + self.pos(idx[:,rows],idx[:,cols], B, L, nc_cycle)
+                  + self.pos(idx[:,rows],idx[:,cols], B, L, cyclize_reses)
                 ).to(rbf_feat.dtype)
                 rbf_feat[:,rows[:,None],cols[None,:]] = rbf_feat_ij
 
@@ -673,7 +679,7 @@ class IterBlock(nn.Module):
             pair = checkpoint.checkpoint(create_custom_forward(self.msa2pair), msa, pair, strides, use_reentrant=True)
             pair = checkpoint.checkpoint(create_custom_forward(self.pair2pair), pair, rbf_feat, state, strides, crop, use_reentrant=True)
             R, T, state, alpha = checkpoint.checkpoint(
-                create_custom_forward(self.str2str, top_k=topk, nc_cycle=nc_cycle), 
+                create_custom_forward(self.str2str, top_k=topk, cyclize_reses=cyclize_reses), 
                 msa, pair, R_in, T_in, xyz, state, idx, strides, use_reentrant=True
             )
         else:
@@ -688,7 +694,7 @@ class IterBlock(nn.Module):
                 msa = msa.to(pair.device)
 
             R, T, state, alpha = self.str2str(
-                msa, pair, R_in, T_in, xyz, state, idx, strides, top_k=topk, nc_cycle=nc_cycle
+                msa, pair, R_in, T_in, xyz, state, idx, strides, top_k=topk, cyclize_reses=cyclize_reses
             ) 
 
         # update contacting subunits
@@ -754,7 +760,7 @@ class IterativeSimulator(nn.Module):
         self, seq, msa, msa_full, pair, xyz_in, state, idx, 
         strides, symmids, symmsub, symmRs, symmmeta, 
         use_checkpoint=False, p2p_crop=-1, topk_crop=-1,
-        low_vram=False, nc_cycle=False
+        low_vram=False, cyclize_reses=None
     ):
         # input:
         #   seq: query sequence (B, L)
@@ -793,7 +799,7 @@ class IterativeSimulator(nn.Module):
                 msa_full, pair, R_in, T_in, xyz, state, idx, 
                 strides, symmids, symmsub_in, symmsub, symmRs, symmmeta,
                 use_checkpoint=use_checkpoint, crop=p2p_crop, topk=topk_crop,
-                low_vram=low_vram, nc_cycle=nc_cycle)
+                low_vram=low_vram, cyclize_reses=cyclize_reses)
 
             R_s.append(R_in)
             T_s.append(T_in)
@@ -810,7 +816,7 @@ class IterativeSimulator(nn.Module):
                 msa, pair, R_in, T_in, xyz, state, idx, 
                 strides, symmids, symmsub_in, symmsub, symmRs, symmmeta,
                 use_checkpoint=use_checkpoint, crop=p2p_crop, topk=topk_crop,
-                low_vram=low_vram, nc_cycle=nc_cycle)
+                low_vram=low_vram, cyclize_reses=cyclize_reses)
 
             R_s.append(R_in)
             T_s.append(T_in)
@@ -823,7 +829,7 @@ class IterativeSimulator(nn.Module):
             T_in = T_in.detach() # detach rotation (for stability)
             xyz = einsum('bnij,bnaj->bnai', R_in, xyz_in) + T_in.unsqueeze(-2)
             R_in, T_in, state, alpha = self.str_refiner(
-                msa, pair, R_in, T_in, xyz, state, idx, strides, top_k=64, nc_cycle=nc_cycle)
+                msa, pair, R_in, T_in, xyz, state, idx, strides, top_k=64, cyclize_reses=cyclize_reses)
 
             if symmsub_in is not None and symmsub_in.shape[0]>1:
                 R_in, T_in = update_symm_Rs(R_in, T_in, Lasu, symmsub_in, symmsub, symmRs)

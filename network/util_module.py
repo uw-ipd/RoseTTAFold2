@@ -90,7 +90,7 @@ def rbf(D, D_min=0.0, D_count=64, D_sigma=0.5):
     RBF = torch.exp(-((D_expand - D_mu) / D_sigma)**2)
     return RBF
 
-def get_seqsep(idx, nc_cycle=False):
+def get_seqsep(idx, cyclic):
     '''
     Input:
         - idx: residue indices of given sequence (B,L)
@@ -98,16 +98,18 @@ def get_seqsep(idx, nc_cycle=False):
         - seqsep: sequence separation feature with sign (B, L, L, 1)
                   Sergey found that having sign in seqsep features helps a little
     '''
-    L = idx.shape[1]
     seqsep = idx[:,None,:] - idx[:,:,None]
-    if nc_cycle:
-        seqsep = (seqsep+L//2)%L-L//2
-    #print ('c', seqsep[0])
-
     sign = torch.sign(seqsep)
     neigh = torch.abs(seqsep)
     neigh[neigh > 1] = 0.0 # if bonded -- 1.0 / else 0.0
     neigh = sign * neigh
+
+    # add cyclic edges
+    if (cyclic.sum()>=2):
+        cres = cyclic.nonzero()
+        neigh[:,cres[-1],cres[0]] = 1
+        neigh[:,cres[0],cres[-1]] = -1
+
     return neigh.unsqueeze(-1)
 
 def get_topk(D, sep, top_k=64, kmin=32):

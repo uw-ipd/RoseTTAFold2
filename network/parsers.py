@@ -8,7 +8,7 @@ import util
 import gzip
 import torch
 from ffindex import *
-from chemical import INIT_CRDS
+from chemical import INIT_CRDS, aa2num
 import chemical
 
 to1letter = {
@@ -16,6 +16,22 @@ to1letter = {
     "GLN":'Q', "GLU":'E', "GLY":'G', "HIS":'H', "ILE":'I',
     "LEU":'L', "LYS":'K', "MET":'M', "PHE":'F', "PRO":'P',
     "SER":'S', "THR":'T', "TRP":'W', "TYR":'Y', "VAL":'V' }
+
+def get_dislf(seq, xyz, mask):
+    L = seq.shape[0]
+    resolved_cys_mask = ((seq==aa2num['CYS']) * mask[:,5]).nonzero().squeeze(-1)  # cys[5]=='sg'
+    sgs = xyz[resolved_cys_mask,5]
+    ii,jj = torch.triu_indices(sgs.shape[0],sgs.shape[0],1)
+    d_sg_sg = torch.linalg.norm(sgs[ii,:]-sgs[jj,:], dim=-1)
+    is_dslf = (d_sg_sg>1.0)*(d_sg_sg<3.0)
+
+    dslf = []
+    for i in is_dslf.nonzero():
+        dslf.append( (
+            resolved_cys_mask[ii[i]].item(),
+            resolved_cys_mask[jj[i]].item(),
+        ) )
+    return dslf
 
 def read_multichain_template_pdb(pdb_fn, target_chain=None, templ_from_nontgt=True):
     print ('read_multichain_template_pdb',templ_from_nontgt)
@@ -85,7 +101,7 @@ def read_multichain_template_pdb(pdb_fn, target_chain=None, templ_from_nontgt=Tr
 
     for i in range(xyz.shape[0]):
         if (mask[i].any()):
-            xyz[i] = center_and_realign_missing(xyz[i], mask[i])
+            xyz[i] = util.center_and_realign_missing(xyz[i], mask[i])
 
     CONF=0.5
 

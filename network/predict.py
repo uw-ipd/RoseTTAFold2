@@ -540,7 +540,14 @@ class Predictor():
                 torch.cuda.empty_cache()
                 if (bestmodel is None or torch.mean(bestmodel['plddt']) < torch.mean(retval['plddt']) ):
                     bestmodel = model_i
-            allpreds.append( ("%s_%02d_%02d_pred.pdb"%(out_prefix, i, i_trial), bestmodel,count_i) )
+
+            allpreds.append( 
+                (
+                    "%s_%02d_%02d_pred.pdb"%(out_prefix, i, i_trial),
+                    bestmodel,
+                    count_i
+                )
+            )
 
         from density import rosetta_density_dock
         rosetta_density_dock(allpreds, mapfile)

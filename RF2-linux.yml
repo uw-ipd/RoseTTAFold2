@@ -19,3 +19,5 @@ dependencies:
   - pyg
   - hhsuite
   - pyrosetta
+  - pip:
+      - gemmi

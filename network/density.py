@@ -3,6 +3,7 @@ import torch
 import util
 import glob
 #import numpy as np
+import gemmi
 
 from pyrosetta import *
 init("-beta -crystal_refine -mute core -unmute core.scoring.electron_density -multithreading:total_threads 4")
@@ -19,13 +20,13 @@ def setup_docking_mover(counts):
     dock_into_dens.setB( 16 )
     dock_into_dens.setGridStep( 1 )
     dock_into_dens.setTopN( 500 , 50*counts , 1*counts )
-    dock_into_dens.setMinDist( 3 )
+    dock_into_dens.setMinDist( 4 )
     dock_into_dens.setNCyc( 1 )
     dock_into_dens.setClusterRadius( 3 )
     dock_into_dens.setFragDens( 0.9 )
     dock_into_dens.setMinBackbone( False )
     dock_into_dens.setDoRefine( True )
-    dock_into_dens.setMaxRotPerTrans( 10 )
+    dock_into_dens.setMaxRotPerTrans( 4 )
     dock_into_dens.setPointRadius( 5 )
     dock_into_dens.setConvoluteSingleR( False )
     dock_into_dens.setLaplacianOffset( 0 )
@@ -210,21 +211,44 @@ def multidock_model(pdbfile,mapfile, counts):
         #os.remove(filename) 
     return pose
 
-def rosetta_density_dock ( preds, mapfile ):
+def cut_model_from_density(mapfile, pdbfile, mapfileout):
+    m = gemmi.read_ccp4_map(mapfile)
+    st = gemmi.read_structure(pdbfile)
+    offset = gemmi.Position(m.header_float(50),m.header_float(51),m.header_float(52))
+    for chain in st[0]:
+        for residue in chain:
+            for atom in residue:
+               atom.pos -= offset
+    masker = gemmi.SolventMasker(gemmi.AtomicRadiiSet.Constant, 4.0)
+    masker.set_to_zero(m.grid, st[0])
+    #m.update_ccp4_header()
+    m.write_ccp4_map(mapfileout)
+
+
+def rosetta_density_dock ( preds, mapfile_in ):
     pose = None
+    mapfile_working = mapfile_in
     for i,(outfile,model,counts) in enumerate(preds):
+        print (outfile,counts)
         model = plddt_trim(model)
         models = pae_split(model)
+
+        # sort by # resolved residues
+        models = sorted(models, key=lambda x:sum(x['Ls']), reverse=True)
 
         for j,m in enumerate(models):
             if (sum(m['Ls'])<10):
                 continue
-            util.writepdb(outfile+f".m{i}_d{j}.pdb", m['xyz'], m['seq'], m['Ls'], bfacts=100*m['plddt'])
-            pose_i = multidock_model(outfile+f".m{i}_d{j}.pdb", mapfile, counts)
+            filename = f"{outfile}.m{i}_d{j}.pdb"
+            util.writepdb(filename, m['xyz'], m['seq'], m['Ls'], bfacts=100*m['plddt'])
+            pose_i = multidock_model(filename, mapfile_working, counts)
             if pose is None:
                 pose = pose_i
             else:
                 pose.append_pose_by_jump( pose_i, 1 )
+
+            cut_model_from_density(mapfile_working, filename, f"temp.m{i}_d{j}.mrc")
+            mapfile_working = f"temp.m{i}_d{j}.mrc"
 
     rosetta_density_relax(pose)
 

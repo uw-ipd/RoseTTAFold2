@@ -370,7 +370,7 @@ class Trainer():
             #print ('no model found', model_name)
             return -1, best_valid_loss
         map_location = {"cuda:%d"%0: "cuda:%d"%rank}
-        checkpoint = torch.load(chk_fn, map_location=map_location)
+        checkpoint = torch.load(chk_fn, map_location=map_location, weights_only=False)
         rename_model = False
         model.module.model.load_state_dict(checkpoint['model_state_dict'], strict=False)
         model.module.shadow.load_state_dict(checkpoint['model_state_dict'], strict=False)

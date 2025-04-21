@@ -231,7 +231,7 @@ class Predictor():
     def load_model(self, model_weights):
         if not os.path.exists(model_weights):
             return False
-        checkpoint = torch.load(model_weights, map_location=self.device)
+        checkpoint = torch.load(model_weights, map_location=self.device, weights_only=False)
         self.model.load_state_dict(checkpoint['model_state_dict'],strict=False)
         for m_i in self.model.simulator.extra_block:
             m_i.pair2pair = m_i.pair2pair.half()

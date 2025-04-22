@@ -61,7 +61,7 @@ tar xfz pdb100_2021Mar03.tar.gz
 Prepare to run
 ```
 conda activate RF2
-cd example
+cd examples
 ```
 
 ### Example 1: predicting the structure of a monomer
